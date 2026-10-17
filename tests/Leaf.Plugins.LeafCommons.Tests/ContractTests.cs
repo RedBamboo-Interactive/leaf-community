@@ -72,6 +72,17 @@ public sealed class ContractTests
         Assert.Equal(1, handled); Assert.Equal(["p1", "p1", "p2"], acked);
     }
 
+    [Fact]
+    public async Task Relay_profile_request_contains_only_public_fields()
+    {
+        var handler = new CaptureHttpHandler();
+        var relay = new RelayHttpClient(new HttpClient(handler), () => (new Uri("https://relay.example"), "envoy.secret"));
+        await relay.UpdateProfileAsync("Nova · Owner", "envoys/envoy-1/profile.webp", new Dictionary<string, bool> { ["consult"] = true });
+        using var body = JsonDocument.Parse(handler.Body!);
+        Assert.Equal(["avatarObjectKey", "personaName", "scenarioToggles"], body.RootElement.EnumerateObject().Select(x => x.Name).Order().ToArray());
+        Assert.Equal("Bearer", handler.AuthorizationScheme); Assert.Equal("envoy.secret", handler.AuthorizationParameter);
+    }
+
     private static ClaimsPrincipal Principal(string executionIdentity) => new(new ClaimsIdentity([new Claim("token_use", "execution"), new Claim("execution_identity", executionIdentity)], "test"));
 }
 
@@ -82,5 +93,15 @@ internal sealed class CaptureGateway(HttpStatusCode status, string response) : I
     {
         Calls++; Body = await request.Content!.ReadAsStringAsync(ct);
         return new(status) { Content = JsonContent.Create(JsonDocument.Parse(response).RootElement) };
+    }
+}
+
+internal sealed class CaptureHttpHandler : HttpMessageHandler
+{
+    public string? Body { get; private set; } public string? AuthorizationScheme { get; private set; } public string? AuthorizationParameter { get; private set; }
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Body = await request.Content!.ReadAsStringAsync(cancellationToken); AuthorizationScheme = request.Headers.Authorization?.Scheme; AuthorizationParameter = request.Headers.Authorization?.Parameter;
+        return new(HttpStatusCode.OK) { Content = JsonContent.Create(new { envoy = new { } }) };
     }
 }

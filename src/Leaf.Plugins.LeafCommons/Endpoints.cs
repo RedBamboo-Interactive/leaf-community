@@ -20,7 +20,7 @@ public static class CommonsEndpoints
         {
             var settings = await store.GetSettingsAsync(ct); return IsOwner(auth, settings) ? Results.Ok(settings.Public()) : Forbidden();
         });
-        group.MapPut("/settings", async (SettingsUpdate update, IAuthContext auth, CommonsStateStore store, CancellationToken ct) =>
+        group.MapPut("/settings", async (SettingsUpdate update, IAuthContext auth, CommonsStateStore store, RelayHttpClient relayClient, CancellationToken ct) =>
         {
             if (!Uri.TryCreate(update.RelayBaseUrl, UriKind.Absolute, out var relay) || relay.Scheme is not ("http" or "https")) return Results.BadRequest(new { error = "invalid_relay_url" });
             var current = await store.GetSettingsAsync(ct);
@@ -29,6 +29,8 @@ public static class CommonsEndpoints
             var saved = await store.SaveSettingsAsync(new(current.EntityId, relay.ToString(), credential, current.ConnectionStatus,
                 update.Persona, update.Avatar, update.ScenarioToggles, update.ShareableFolders, update.PersonalWords,
                 update.Canaries, update.NovaDiscussionId, update.LinkAllowlist, current.OwnerUserId ?? auth.UserId, update.AgentEntityId), ct);
+            if (!string.IsNullOrWhiteSpace(saved.Credential))
+                await relayClient.UpdateProfileAsync(saved.Persona, saved.Avatar, saved.ScenarioToggles, ct);
             return Results.Ok(saved.Public());
         });
         group.MapGet("/oauth/start", async (string callback, string? scenarios, IAuthContext auth, RelayHttpClient relay, CommonsStateStore store, CancellationToken ct) =>

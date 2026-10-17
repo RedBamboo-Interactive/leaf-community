@@ -28,6 +28,18 @@ public sealed class RelayHttpClient(HttpClient http, Func<(Uri BaseUri, string? 
         return new(root.GetProperty("credential").GetString()!, envoy.GetProperty("status").GetString()!, envoy.GetProperty("personaName").GetString()!, envoy.GetProperty("id").GetString()!, envoy.TryGetProperty("avatarObjectKey", out var avatar) ? avatar.GetString() : null);
     }
 
+    public async Task UpdateProfileAsync(string persona, string? avatarObjectKey, IReadOnlyDictionary<string, bool> scenarioToggles, CancellationToken ct = default)
+    {
+        using var response = await SendAsync(HttpMethod.Patch, "/v1/profile", JsonContent.Create(new
+        {
+            personaName = persona,
+            avatarObjectKey,
+            scenarioToggles,
+        }), ct);
+        if (!response.IsSuccessStatusCode)
+            throw new HttpRequestException($"Relay profile update failed with HTTP {(int)response.StatusCode}");
+    }
+
     public async Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default)
     {
         var list = new List<RelayMessage>();
