@@ -5,8 +5,8 @@ using Leaf.Sdk.Services;
 
 namespace Leaf.Plugins.LeafCommons;
 
-public sealed record BriefRequest(string Kind, string Content);
-public sealed record BriefDecisionRequest(string Decision, string? Content);
+public sealed record BriefRequest(string Kind, string Content, string? Title = null, string[]? Addresses = null);
+public sealed record BriefDecisionRequest(string Decision, string? Content, string? Title = null, string[]? Addresses = null);
 public sealed record SettingsUpdate(string RelayBaseUrl, string? Credential, string Persona, string? Avatar,
     Dictionary<string, bool> ScenarioToggles, string[] ShareableFolders, string[] PersonalWords, string[] Canaries,
     string? NovaDiscussionId, string[] LinkAllowlist, string? OwnerUserId, string AgentEntityId);
@@ -24,20 +24,31 @@ public static class CommonsEndpoints
         {
             if (!Uri.TryCreate(update.RelayBaseUrl, UriKind.Absolute, out var relay) || relay.Scheme is not ("http" or "https")) return Results.BadRequest(new { error = "invalid_relay_url" });
             var current = await store.GetSettingsAsync(ct);
-            if (!IsOwner(auth, current, allowInitialize: true) || (!auth.IsInRole("admin") && update.OwnerUserId is not null && update.OwnerUserId != auth.UserId)) return Forbidden();
+            if (!CanWriteSettings(auth, current, update.OwnerUserId)) return Forbidden();
             var credential = string.IsNullOrWhiteSpace(update.Credential) ? current.Credential : update.Credential;
             var saved = await store.SaveSettingsAsync(new(current.EntityId, relay.ToString(), credential, current.ConnectionStatus,
                 update.Persona, update.Avatar, update.ScenarioToggles, update.ShareableFolders, update.PersonalWords,
-                update.Canaries, update.NovaDiscussionId, update.LinkAllowlist, current.OwnerUserId ?? auth.UserId, update.AgentEntityId), ct);
+                update.Canaries, update.NovaDiscussionId, update.LinkAllowlist, ResolveOwnerUserId(auth, current, update.OwnerUserId), update.AgentEntityId), ct);
             if (!string.IsNullOrWhiteSpace(saved.Credential))
                 await relayClient.UpdateProfileAsync(saved.Persona, saved.Avatar, saved.ScenarioToggles, ct);
             return Results.Ok(saved.Public());
         });
-        group.MapGet("/oauth/start", async (string callback, string? scenarios, IAuthContext auth, RelayHttpClient relay, CommonsStateStore store, CancellationToken ct) =>
-            IsOwner(auth, await store.GetSettingsAsync(ct)) ? Results.Ok(new { authorizeUrl = relay.BuildAuthorizeUri(new Uri(callback), (scenarios ?? "showcase,consult,bug").Split(',', StringSplitOptions.RemoveEmptyEntries)) }) : Forbidden());
-        group.MapGet("/oauth/callback", async (string exchangeCode, IAuthContext auth, RelayHttpClient relay, CommonsStateStore store, CancellationToken ct) =>
+        group.MapGet("/oauth/start", async (string callback, string? scenarios, bool? rejoin, IAuthContext auth, RelayHttpClient relay, CommonsStateStore store, CancellationToken ct) =>
         {
-            var before = await store.GetSettingsAsync(ct); if (!IsOwner(auth, before)) return Forbidden();
+            var settings = await store.GetSettingsAsync(ct);
+            if (!IsConfiguredOwner(auth, settings) || string.IsNullOrWhiteSpace(auth.UserId)) return Forbidden();
+            if (IsActive(settings) && rejoin != true) return Results.Conflict(new { error = "active_credential_requires_rejoin" });
+            var oauth = await store.CreateOAuthStateAsync(auth.UserId, rejoin == true, ct: ct);
+            var callbackWithState = AddQuery(callback, "state", oauth.State);
+            return Results.Ok(new { authorizeUrl = relay.BuildAuthorizeUri(callbackWithState, (scenarios ?? "showcase,consult,open_question,bug").Split(',', StringSplitOptions.RemoveEmptyEntries)) });
+        });
+        group.MapGet("/oauth/callback", async (string exchangeCode, string? state, IAuthContext auth, RelayHttpClient relay, CommonsStateStore store, CancellationToken ct) =>
+        {
+            var before = await store.GetSettingsAsync(ct);
+            if (!IsConfiguredOwner(auth, before) || string.IsNullOrWhiteSpace(auth.UserId)) return Forbidden();
+            var consumed = await store.ConsumeOAuthStateAsync(state, auth.UserId, ct: ct);
+            if (consumed.Status != OAuthStateStatus.Accepted) return OAuthStateFailure(consumed.Status);
+            if (!CanCompleteOAuthCallback(before, consumed)) return Results.Conflict(new { error = "active_credential_requires_rejoin" });
             var exchange = await relay.ExchangeAsync(exchangeCode, ct);
             await store.SaveSettingsAsync(before with { Credential = exchange.Credential, ConnectionStatus = exchange.Status == "pending" ? "pending approval" : exchange.Status, Persona = exchange.PersonaName, Avatar = exchange.AvatarObjectKey }, ct);
             return Results.Redirect("/apps/leaf-commons?joined=pending");
@@ -46,17 +57,17 @@ public static class CommonsEndpoints
         {
             var settings = await store.GetSettingsAsync(ct); var caller = OwnerGuard.ReadPrivateNovaAgent(http.User, settings);
             if (caller is null) return Results.Json(new { error = "owner_agent_required" }, statusCode: 403);
-            var brief = await store.EnqueueBriefAsync(request.Kind, request.Content, caller, ct);
+            var brief = await store.EnqueueBriefAsync(request.Kind, request.Content, request.Title, request.Addresses, caller, ct);
             return Results.Accepted(value: new { id = brief.Id, state = "preview" });
         });
         group.MapGet("/briefs", async (IAuthContext auth, CommonsStateStore store, CancellationToken ct) =>
         {
-            var settings = await store.GetSettingsAsync(ct); return IsOwner(auth, settings) ? Results.Ok(new { items = (await store.ListBriefsAsync(ct)).Select(x => new { id = x.Id, kind = x.Data["kind"], content = x.Data["content"], state = x.Data["state"] }) }) : Forbidden();
+            var settings = await store.GetSettingsAsync(ct); return IsOwner(auth, settings) ? Results.Ok(new { items = (await store.ListBriefsAsync(ct)).Select(x => new { id = x.Id, kind = x.Data["kind"], title = x.Data["title"], content = x.Data["content"], addresses = x.Data["addresses"], state = x.Data["state"] }) }) : Forbidden();
         });
         group.MapPost("/briefs/{id:guid}/decision", async (Guid id, BriefDecisionRequest request, IAuthContext auth, CommonsStateStore store, CommonsRuntime runtime, CancellationToken ct) =>
         {
             var settings = await store.GetSettingsAsync(ct); if (!IsOwner(auth, settings) || string.IsNullOrWhiteSpace(auth.UserId)) return Forbidden();
-            var brief = await store.DecideBriefAsync(id, request.Decision, request.Content, auth.UserId, ct);
+            var brief = await store.DecideBriefAsync(id, request.Decision, request.Content, request.Title, request.Addresses, auth.UserId, ct);
             EnvoyRunResult? result = null;
             if (request.Decision == "approved") result = await runtime.DispatchApprovedBriefAsync(brief, ct);
             return Results.Ok(new { id = brief.Id, state = brief.Data["state"], result });
@@ -70,6 +81,43 @@ public static class CommonsEndpoints
         });
     }
 
-    private static bool IsOwner(IAuthContext auth, CommonsSettings settings, bool allowInitialize = false) => auth.IsInRole("admin") || (!string.IsNullOrWhiteSpace(auth.UserId) && (string.Equals(auth.UserId, settings.OwnerUserId, StringComparison.Ordinal) || (allowInitialize && string.IsNullOrWhiteSpace(settings.OwnerUserId))));
+    public static bool CanWriteSettings(IAuthContext auth, CommonsSettings settings, string? requestedOwnerId)
+    {
+        if (auth.IsInRole("admin")) return !string.IsNullOrWhiteSpace(auth.UserId);
+        return !string.IsNullOrWhiteSpace(auth.UserId)
+            && string.Equals(auth.UserId, settings.OwnerUserId, StringComparison.Ordinal)
+            && (string.IsNullOrWhiteSpace(requestedOwnerId) || string.Equals(requestedOwnerId, settings.OwnerUserId, StringComparison.Ordinal));
+    }
+
+    public static string ResolveOwnerUserId(IAuthContext auth, CommonsSettings settings, string? requestedOwnerId)
+    {
+        if (!CanWriteSettings(auth, settings, requestedOwnerId)) throw new UnauthorizedAccessException("Only an admin may initialize or change ownership");
+        if (auth.IsInRole("admin") && !string.IsNullOrWhiteSpace(requestedOwnerId)) return requestedOwnerId;
+        return settings.OwnerUserId ?? auth.UserId!;
+    }
+
+    public static bool CanCompleteOAuthCallback(CommonsSettings settings, OAuthStateConsumption state) =>
+        state.Status == OAuthStateStatus.Accepted && (!IsActive(settings) || state.AllowActiveOverwrite);
+
+    private static bool IsOwner(IAuthContext auth, CommonsSettings settings) => auth.IsInRole("admin") || IsConfiguredOwner(auth, settings);
+    private static bool IsConfiguredOwner(IAuthContext auth, CommonsSettings settings) => !string.IsNullOrWhiteSpace(auth.UserId) && string.Equals(auth.UserId, settings.OwnerUserId, StringComparison.Ordinal);
+    private static bool IsActive(CommonsSettings settings) => !string.IsNullOrWhiteSpace(settings.Credential) && string.Equals(settings.ConnectionStatus, "active", StringComparison.OrdinalIgnoreCase);
+    private static Uri AddQuery(string callback, string name, string value)
+    {
+        var uri = new Uri(callback, UriKind.Absolute);
+        var builder = new UriBuilder(uri);
+        var existing = builder.Query.TrimStart('?');
+        builder.Query = (existing.Length == 0 ? "" : existing + "&") + Uri.EscapeDataString(name) + "=" + Uri.EscapeDataString(value);
+        return builder.Uri;
+    }
+    private static IResult OAuthStateFailure(OAuthStateStatus status) => status switch
+    {
+        OAuthStateStatus.Missing => Results.BadRequest(new { error = "oauth_state_missing" }),
+        OAuthStateStatus.Unknown => Results.BadRequest(new { error = "oauth_state_unknown" }),
+        OAuthStateStatus.Expired => Results.BadRequest(new { error = "oauth_state_expired" }),
+        OAuthStateStatus.Reused => Results.Conflict(new { error = "oauth_state_reused" }),
+        OAuthStateStatus.OtherUser => Results.Json(new { error = "oauth_state_owner_mismatch" }, statusCode: 403),
+        _ => Results.BadRequest(new { error = "oauth_state_invalid" })
+    };
     private static IResult Forbidden() => Results.Json(new { error = "owner_required" }, statusCode: 403);
 }

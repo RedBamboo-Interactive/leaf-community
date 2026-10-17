@@ -25,6 +25,7 @@ public sealed class LeafCommonsPlugin : ILeafPlugin
         services.AddSingleton<Func<(Uri BaseUri, string? Credential)>>(sp => () => { var settings = sp.GetRequiredService<CommonsStateStore>().GetSettingsAsync().GetAwaiter().GetResult(); return (new Uri(settings.RelayBaseUrl), settings.Credential); });
         services.AddHttpClient("commons-relay"); services.AddHttpClient("commons-digest");
         services.AddSingleton(sp => new RelayHttpClient(sp.GetRequiredService<IHttpClientFactory>().CreateClient("commons-relay"), sp.GetRequiredService<Func<(Uri BaseUri, string? Credential)>>()));
+        services.AddSingleton<IEnvoyRelay>(sp => sp.GetRequiredService<RelayHttpClient>());
         services.AddSingleton(sp => new NovaDigestSink(sp.GetRequiredService<IHttpClientFactory>().CreateClient("commons-digest"), sp.GetRequiredKeyedService<IExecutionTokens>(PluginId), sp.GetRequiredService<CommonsStateStore>(), sp.GetRequiredService<DigestFormatter>(), sp.GetRequiredService<ICommonsAudit>()));
         services.AddSingleton<IDigestSink>(sp => sp.GetRequiredService<NovaDigestSink>());
         services.AddSingleton<CommonsRuntime>();

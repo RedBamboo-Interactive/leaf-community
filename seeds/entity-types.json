@@ -1,5 +1,6 @@
 [
   {"typeSlug":"entity-type","slug":"leaf-commons-settings","name":"Commons Settings","data":{"icon":"ph-bold ph-leaf","color":"emerald","folder":"config","versioning":true,"description":"Private relay, Envoy, local policy, and digest settings"}},
   {"typeSlug":"entity-type","slug":"leaf-commons-brief","name":"Commons Brief","data":{"icon":"ph-bold ph-note","color":"emerald","folder":"queue","versioning":true,"description":"Owner-gated preview brief"}},
+  {"typeSlug":"entity-type","slug":"leaf-commons-oauth-state","name":"Commons OAuth State","data":{"icon":"ph-bold ph-key","color":"emerald","folder":"config","versioning":false,"description":"Short-lived, owner-bound, single-use connector OAuth state"}},
   {"typeSlug":"entity-type","slug":"leaf-commons-audit","name":"Commons Audit","data":{"icon":"ph-bold ph-shield-check","color":"emerald","folder":"audit","versioning":false,"description":"Content-minimized local security audit event"}}
 ]

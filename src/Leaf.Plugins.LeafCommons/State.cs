@@ -1,4 +1,6 @@
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Leaf.Sdk;
@@ -25,6 +27,8 @@ public sealed record CommonsSettings(
 
 public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
 {
+    private static readonly TimeSpan OAuthStateLifetime = TimeSpan.FromMinutes(10);
+
     public async Task<CommonsSettings> GetSettingsAsync(CancellationToken ct = default)
     {
         var e = await entities.GetBySlugAsync("leaf-commons-settings", "settings", ct);
@@ -41,13 +45,16 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         return FromEntity(saved);
     }
 
-    public async Task<LeafEntity> EnqueueBriefAsync(string kind, string content, LeafAgentCaller caller, CancellationToken ct = default)
+    public async Task<LeafEntity> EnqueueBriefAsync(string kind, string content, string? title, IReadOnlyList<string>? addresses, LeafAgentCaller caller, CancellationToken ct = default)
     {
-        if (!new[] { "showcase", "consult", "bug_report", "intro_draft" }.Contains(kind)) throw new ArgumentException("Unsupported brief kind");
+        if (!new[] { "showcase", "consult", "open_question", "bug", "bug_report", "intro_draft" }.Contains(kind)) throw new ArgumentException("Unsupported brief kind");
         if (string.IsNullOrWhiteSpace(content) || content.Length > 12_000) throw new ArgumentException("Brief content must be 1-12000 characters");
+        ValidateTitle(kind, title);
+        if (addresses is { Count: > 10 } || addresses?.Any(string.IsNullOrWhiteSpace) == true) throw new ArgumentException("Addresses must contain at most 10 non-empty values");
         var brief = await entities.CreateAsync("leaf-commons-brief", $"{kind} preview", new JsonObject
         {
-            ["kind"] = kind, ["content"] = content, ["state"] = "preview",
+            ["kind"] = kind, ["title"] = title, ["content"] = content,
+            ["addresses"] = JsonSerializer.SerializeToNode(addresses ?? []), ["state"] = "preview",
             ["owner_id"] = caller.BeneficiaryId, ["agent_id"] = caller.AgentEntityId
         }, ct);
         await RecordAsync("brief_enqueued", new Dictionary<string, object?> { ["briefId"] = brief.Id, ["kind"] = kind }, ct);
@@ -57,18 +64,59 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
     public Task<IReadOnlyList<LeafEntity>> ListBriefsAsync(CancellationToken ct = default) =>
         entities.QueryAsync(new EntityQuery { TypeSlug = "leaf-commons-brief", OrderById = true, Limit = 200 }, ct);
 
-    public async Task<LeafEntity> DecideBriefAsync(Guid id, string decision, string? editedContent, string ownerId, CancellationToken ct = default)
+    public async Task<LeafEntity> DecideBriefAsync(Guid id, string decision, string? editedContent, string? editedTitle, IReadOnlyList<string>? editedAddresses, string ownerId, CancellationToken ct = default)
     {
         var brief = await entities.GetAsync(id) ?? throw new KeyNotFoundException("Brief not found");
         if (brief.TypeSlug != "leaf-commons-brief" || brief.Data["state"]?.GetValue<string>() != "preview") throw new InvalidOperationException("Brief is not pending preview");
         if (!string.Equals(brief.Data["owner_id"]?.GetValue<string>(), ownerId, StringComparison.Ordinal)) throw new UnauthorizedAccessException("Only the owner may decide this brief");
         if (decision is not ("approved" or "rejected")) throw new ArgumentException("Decision must be approved or rejected");
         if (editedContent is { Length: > 12000 }) throw new ArgumentException("Edited content too large");
+        var finalContent = editedContent ?? brief.Data["content"]?.GetValue<string>() ?? "";
+        if (string.IsNullOrWhiteSpace(finalContent)) throw new ArgumentException("Edited content must not be empty");
+        var finalTitle = editedTitle ?? S(brief.Data, "title");
+        ValidateTitle(S(brief.Data, "kind")!, finalTitle);
+        var finalAddresses = editedAddresses ?? List(brief.Data["addresses"]);
+        if (finalAddresses.Count > 10 || finalAddresses.Any(string.IsNullOrWhiteSpace)) throw new ArgumentException("Addresses must contain at most 10 non-empty values");
         var patch = new JsonObject { ["state"] = decision };
         if (editedContent is not null) patch["content"] = editedContent;
+        if (editedTitle is not null) patch["title"] = editedTitle;
+        if (editedAddresses is not null) patch["addresses"] = JsonSerializer.SerializeToNode(editedAddresses);
         var updated = await entities.PatchAsync(id, patch, ct: ct);
         await RecordAsync("brief_decision", new Dictionary<string, object?> { ["briefId"] = id, ["decision"] = decision }, ct);
         return updated;
+    }
+
+    public async Task<OAuthStateIssue> CreateOAuthStateAsync(string ownerId, bool allowActiveOverwrite, DateTimeOffset? now = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(ownerId)) throw new ArgumentException("OAuth state requires an owner", nameof(ownerId));
+        var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        var slug = OAuthStateSlug(token);
+        var issuedAt = now ?? DateTimeOffset.UtcNow;
+        await entities.UpsertBySlugAsync("leaf-commons-oauth-state", slug, "Commons OAuth state", new JsonObject
+        {
+            ["owner_id"] = ownerId,
+            ["expires_at"] = issuedAt.Add(OAuthStateLifetime).ToString("O"),
+            ["consumed"] = false,
+            ["allow_active_overwrite"] = allowActiveOverwrite
+        }, ct);
+        return new(token, issuedAt.Add(OAuthStateLifetime));
+    }
+
+    public async Task<OAuthStateConsumption> ConsumeOAuthStateAsync(string? token, string ownerId, DateTimeOffset? now = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(token)) return new(OAuthStateStatus.Missing);
+        var slug = OAuthStateSlug(token);
+        var entity = await entities.GetBySlugAsync("leaf-commons-oauth-state", slug, ct);
+        if (entity is null) return new(OAuthStateStatus.Unknown);
+        if (!string.Equals(S(entity.Data, "owner_id"), ownerId, StringComparison.Ordinal)) return new(OAuthStateStatus.OtherUser);
+        if (entity.Data["consumed"]?.GetValue<bool>() == true) return new(OAuthStateStatus.Reused);
+        if (!DateTimeOffset.TryParse(S(entity.Data, "expires_at"), out var expiresAt) || expiresAt <= (now ?? DateTimeOffset.UtcNow)) return new(OAuthStateStatus.Expired);
+        var replacement = (JsonObject)entity.Data.DeepClone();
+        replacement["consumed"] = true;
+        replacement["consumed_at"] = (now ?? DateTimeOffset.UtcNow).ToString("O");
+        var consumed = await entities.CompareExchangeBySlugAsync(entity.TypeSlug, entity.Slug, entity.Name, replacement, entity.UpdatedAt, ct);
+        if (consumed is null) return new(OAuthStateStatus.Reused);
+        return new(OAuthStateStatus.Accepted, entity.Data["allow_active_overwrite"]?.GetValue<bool>() == true);
     }
 
     public async Task RecordAsync(string eventName, IReadOnlyDictionary<string, object?> safeMetadata, CancellationToken ct = default)
@@ -96,7 +144,24 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
     private static string? S(JsonObject d, string key) => d[key]?.GetValue<string>();
     private static IReadOnlyList<string> List(JsonNode? n) => n is JsonArray a ? a.Select(x => x?.GetValue<string>()).Where(x => x is not null).Cast<string>().ToArray() : [];
     private static IReadOnlyDictionary<string, bool> Dict(JsonNode? n) => n is JsonObject o ? o.ToDictionary(x => x.Key, x => x.Value?.GetValue<bool>() ?? false) : new Dictionary<string, bool>();
+    private static void ValidateTitle(string kind, string? title)
+    {
+        if (kind is "consult" or "open_question" or "bug" or "bug_report")
+        {
+            if (string.IsNullOrWhiteSpace(title) || title.Length > 100) throw new ArgumentException("Thread-opening briefs require a 1-100 character title");
+        }
+        else if (title is { Length: > 100 }) throw new ArgumentException("Brief title must be at most 100 characters");
+    }
+    private static string OAuthStateSlug(string token)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(token));
+        return "oauth-state-" + Convert.ToHexString(hash).ToLowerInvariant();
+    }
 }
+
+public sealed record OAuthStateIssue(string State, DateTimeOffset ExpiresAt);
+public enum OAuthStateStatus { Accepted, Missing, Unknown, Expired, Reused, OtherUser }
+public sealed record OAuthStateConsumption(OAuthStateStatus Status, bool AllowActiveOverwrite = false);
 
 public sealed record LeafAgentCaller(string AgentEntityId, string BeneficiaryId);
 

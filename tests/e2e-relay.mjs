@@ -14,11 +14,12 @@ const waitFor=async(fn,label,ms=8000)=>{const start=Date.now();while(!fn()){if(D
 const stop=async child=>{if(child.exitCode!==null)return;child.kill();await Promise.race([once(child,"exit"),new Promise(r=>setTimeout(r,5000))])}
 
 let webhookCount=0
+const webhookBodies=[]
 const discord=createServer(async(req,res)=>{const chunks=[];for await(const c of req)chunks.push(c);const text=Buffer.concat(chunks).toString();const url=new URL(req.url??"/","http://127.0.0.1");const send=(s,v)=>{res.writeHead(s,{"content-type":"application/json"});res.end(JSON.stringify(v))}
   if(url.pathname.endsWith("/oauth2/token")){const f=new URLSearchParams(text);send(200,{access_token:`access-${f.get("code")}`});return}
   if(url.pathname.endsWith("/users/@me")){const slug=(req.headers.authorization??"").replace("Bearer access-","").replace("-code","");send(200,{id:`discord-${slug}`,username:slug,global_name:slug==="a"?"Leaf A":"Leaf B"});return}
   if(/\/users\/@me\/guilds\/[^/]+\/member$/.test(url.pathname)){send(200,{nick:null});return}
-  if(url.pathname.includes("/webhooks/")){const body=JSON.parse(text);assert.deepEqual(body.allowed_mentions,{parse:[]});webhookCount++;send(200,{id:`message-${webhookCount}`,channel_id:typeof body.thread_name==="string"?`thread-${webhookCount}`:"channel"});return}
+  if(url.pathname.includes("/webhooks/")){const body=JSON.parse(text);assert.deepEqual(body.allowed_mentions,{parse:[]});webhookBodies.push(body);webhookCount++;send(200,{id:`message-${webhookCount}`,channel_id:typeof body.thread_name==="string"?`thread-${webhookCount}`:"channel"});return}
   send(500,{error:"unmocked",path:url.pathname})
 })
 
@@ -47,9 +48,11 @@ try{
   aCore=new ConnectorCore("A",async frame=>{if(frame.type!=="ping"||aDigested)return;aDigested=true;const scripted={action:"done",summary:"B recommends exponential backoff capped at 30 seconds."};assert.equal(scripted.action,"done");digests.push({type:"consult_answer",content:`> External Commons quote — consult answer\n> ${scripted.summary}`,threadRef:frame.threadRef})})
   bCore=new ConnectorCore("B",async frame=>{if(frame.type!=="ping"||bAnswered)return;bAnswered=true;const searchAction={action:"search_shareable",query:"backoff"};assert.equal(searchAction.action,"search_shareable");const hits=[...bShareable].filter(([,v])=>v.toLowerCase().includes(searchAction.query)).map(([p])=>p);assert.deepEqual(hits,["project/retry.md"]);const read=bShareable.get(hits[0]);const action={action:"post",content:`From my curated shareable set: ${read}`,addresses:[a.envoy.id]};await post(b.credential,{scenario:"consult_reply",threadRef:frame.threadRef,content:action.content,addresses:action.addresses,idempotencyKey:"b-answer"})})
   await Promise.all([aCore.connect(a.credential),bCore.connect(b.credential)])
-  const brief={kind:"consult",content:"Ask Leaf B for our retry guidance.",state:"preview"};assert.equal(webhookCount,0,"preview must not dispatch");brief.state="approved"
-  const aAction={action:"post",content:"What retry strategy does your shareable engineering set recommend?",addresses:[b.envoy.id]}
-  const opened=await post(a.credential,{scenario:"consult",threadName:"Retry strategy consult",content:aAction.content,addresses:aAction.addresses,idempotencyKey:"a-brief"});assert.equal(opened.decision,"posted");threadRef=opened.threadId
+  const brief={kind:"consult",title:"  Retry strategy consult  ",content:"What retry strategy does your shareable engineering set recommend?\nKeep this line exactly.",addresses:[b.envoy.id],state:"preview"};assert.equal(webhookCount,0,"preview must not dispatch");brief.state="approved"
+  const scriptedModelWouldReplacePreview={action:"post",content:"MODEL CHANGED THE APPROVED BRIEF",addresses:[]};assert.notEqual(scriptedModelWouldReplacePreview.content,brief.content)
+  const opened=await post(a.credential,{scenario:"consult",threadName:brief.title,content:brief.content,addresses:brief.addresses,idempotencyKey:"a-brief"});assert.equal(opened.decision,"posted");threadRef=opened.threadId
+  assert.equal(webhookBodies[0].thread_name,brief.title,"approved title must be byte-exact")
+  assert.equal(webhookBodies[0].content,brief.content,"approved content must be byte-exact")
   await waitFor(()=>bCore.frames.some(f=>f.type==="ping"&&f.threadRef===threadRef),"B ping")
   await waitFor(()=>digests.length===1,"A digest");assert.equal(digests[0].type,"consult_answer");assert.match(digests[0].content,/External Commons quote/);assert.doesNotMatch(digests[0].content,/raw Discord/i)
   assert.equal((await post(a.credential,{scenario:"consult_reply",threadRef,content:"Exchange three",addresses:[b.envoy.id],idempotencyKey:"ex-3"})).decision,"posted")

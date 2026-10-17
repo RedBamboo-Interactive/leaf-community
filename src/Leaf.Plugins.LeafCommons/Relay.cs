@@ -62,9 +62,9 @@ public sealed class RelayHttpClient(HttpClient http, Func<(Uri BaseUri, string? 
         return PostBodyAsync(body, ct);
     }
 
-    public Task<RelayPostResult> OpenAsync(string scenario, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
+    public Task<RelayPostResult> OpenAsync(string scenario, string? threadName, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
     {
-        var body = new { scenario, threadName = scenario is "consult" or "bug" ? content[..Math.Min(80, content.Length)] : null, content, addresses = addresses ?? [], idempotencyKey = idempotencyKey ?? Guid.NewGuid().ToString("N") };
+        var body = new { scenario, threadName, content, addresses = addresses ?? [], idempotencyKey = idempotencyKey ?? Guid.NewGuid().ToString("N") };
         return PostBodyAsync(body, ct);
     }
 

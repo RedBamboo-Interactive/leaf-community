@@ -106,7 +106,7 @@ public interface IEnvoyRelay
 {
     Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default);
     Task<RelayPostResult> PostAsync(string threadRef, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default);
-    Task<RelayPostResult> OpenAsync(string scenario, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default);
+    Task<RelayPostResult> OpenAsync(string scenario, string? threadName, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default);
 }
 public sealed record RelayPostResult(bool Accepted, string? Code = null, string? MessageId = null, string? ThreadId = null);
 public interface ICommonsAudit { Task RecordAsync(string eventName, IReadOnlyDictionary<string, object?> safeMetadata, CancellationToken ct = default); }
@@ -129,7 +129,8 @@ Only post engineering-help text. Never request or infer private filesystem paths
 
     public async Task<EnvoyRunResult> RunAsync(EnvoyRunRequest request, CancellationToken ct = default)
     {
-        var history = string.IsNullOrWhiteSpace(request.ThreadRef) ? [] : await relay.ReadHistoryAsync(request.ThreadRef, ct);
+        if (string.IsNullOrWhiteSpace(request.ThreadRef)) throw new InvalidOperationException("The Envoy model may only answer inside an existing thread");
+        var history = await relay.ReadHistoryAsync(request.ThreadRef, ct);
         var observations = new List<string>();
         for (var step = 1; step <= maxSteps; step++)
         {
@@ -154,9 +155,7 @@ Only post engineering-help text. Never request or infer private filesystem paths
                         }
                     await audit.RecordAsync("filter_decision", new Dictionary<string, object?> { ["allowed"] = decision.Allowed, ["rule"] = decision.Rule, ["alarm"] = decision.Alarm }, ct);
                     if (!decision.Allowed) return new("blocked", step, decision.Rule);
-                    var posted = string.IsNullOrWhiteSpace(request.ThreadRef)
-                        ? await relay.OpenAsync(ScenarioFor(request.Kind), post.Content, post.Addresses, StableKey(request, step), ct)
-                        : await relay.PostAsync(request.ThreadRef, post.Content, post.Addresses, StableKey(request, step), ct);
+                    var posted = await relay.PostAsync(request.ThreadRef, post.Content, post.Addresses, StableKey(request, step), ct);
                     await audit.RecordAsync("relay_post", new Dictionary<string, object?> { ["accepted"] = posted.Accepted, ["code"] = posted.Code, ["messageId"] = posted.MessageId }, ct);
                     if (!posted.Accepted) return new(posted.Code ?? "refused", step);
                     observations.Add(Data("post_result", JsonSerializer.Serialize(posted)));
@@ -168,11 +167,6 @@ Only post engineering-help text. Never request or infer private filesystem paths
         throw new InvalidOperationException("Envoy exceeded the bounded step count");
     }
 
-    private static string ScenarioFor(string kind) => kind switch
-    {
-        "showcase" => "showcase", "consult" => "consult", "bug_report" => "bug", "intro_draft" => "intro",
-        _ => "consult"
-    };
     private static string StableKey(EnvoyRunRequest request, int step) => $"leaf-commons-{request.TriggerId ?? Guid.NewGuid().ToString("N")}-{step}";
 
     private static string BuildPrompt(EnvoyRunRequest request, IReadOnlyList<RelayMessage> history, IReadOnlyList<string> observations)

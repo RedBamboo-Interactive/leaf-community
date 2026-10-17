@@ -3,7 +3,7 @@ using Leaf.Sdk;
 namespace Leaf.Plugins.LeafCommons;
 
 public sealed class CommonsRuntime(
-    IToolFreeModelClient model, ShareableStore shareable, RelayHttpClient relay,
+    IToolFreeModelClient model, ShareableStore shareable, IEnvoyRelay relay,
     OutboundFilter filter, CommonsStateStore state, IDigestSink digests)
 {
     public async Task<EnvoyRunResult> HandleAsync(EnvoyRunRequest request, CancellationToken ct = default)
@@ -29,9 +29,47 @@ public sealed class CommonsRuntime(
 
     public async Task<EnvoyRunResult> DispatchApprovedBriefAsync(LeafEntity brief, CancellationToken ct = default)
     {
-        if (brief.Data["state"]?.GetValue<string>() != "approved") throw new InvalidOperationException("Only approved briefs may reach the Envoy");
-        var result = await HandleAsync(new(null, brief.Data["kind"]!.GetValue<string>(), brief.Data["content"]!.GetValue<string>(), TriggerId: brief.Id.ToString("N")), ct);
-        await state.RecordAsync("brief_envoy_result", new Dictionary<string, object?> { ["briefId"] = brief.Id, ["state"] = result.State, ["steps"] = result.Steps }, ct);
+        if (brief.Data["state"]?.GetValue<string>() != "approved") throw new InvalidOperationException("Only approved briefs may be dispatched");
+        var settings = await state.GetSettingsAsync(ct);
+        var kind = brief.Data["kind"]?.GetValue<string>() ?? throw new InvalidDataException("Brief kind is missing");
+        var scenario = ScenarioFor(kind);
+        var toggle = scenario == "open_question" ? "consult" : scenario;
+        if (settings.ScenarioToggles.TryGetValue(toggle, out var enabled) && !enabled)
+        {
+            await state.RecordAsync("scenario_disabled", new Dictionary<string, object?> { ["scenario"] = toggle, ["briefId"] = brief.Id }, ct);
+            return new("disabled", 0, toggle);
+        }
+
+        var content = brief.Data["content"]?.GetValue<string>() ?? throw new InvalidDataException("Brief content is missing");
+        var title = brief.Data["title"]?.GetValue<string>();
+        var addresses = brief.Data["addresses"] is System.Text.Json.Nodes.JsonArray array
+            ? array.Select(x => x?.GetValue<string>()).Where(x => x is not null).Cast<string>().ToArray()
+            : [];
+        var decision = filter.Check(content, settings.PersonalWords, settings.Canaries);
+        if (decision.Allowed && title is not null) decision = filter.Check(title, settings.PersonalWords, settings.Canaries);
+        if (decision.Allowed)
+            foreach (var address in addresses)
+            {
+                decision = filter.Check(address, settings.PersonalWords, settings.Canaries);
+                if (!decision.Allowed) break;
+            }
+        await state.RecordAsync("filter_decision", new Dictionary<string, object?> { ["briefId"] = brief.Id, ["allowed"] = decision.Allowed, ["rule"] = decision.Rule, ["alarm"] = decision.Alarm }, ct);
+        if (!decision.Allowed) return new("blocked", 0, decision.Rule);
+
+        var posted = await relay.OpenAsync(scenario, title, content, addresses, $"leaf-commons-brief-{brief.Id:N}", ct);
+        await state.RecordAsync("relay_post", new Dictionary<string, object?> { ["briefId"] = brief.Id, ["accepted"] = posted.Accepted, ["code"] = posted.Code, ["messageId"] = posted.MessageId, ["threadId"] = posted.ThreadId }, ct);
+        var result = posted.Accepted ? new EnvoyRunResult("posted", 0, posted.ThreadId) : new EnvoyRunResult(posted.Code ?? "refused", 0);
+        await state.RecordAsync("brief_dispatch", new Dictionary<string, object?> { ["briefId"] = brief.Id, ["state"] = result.State, ["steps"] = 0 }, ct);
         return result;
     }
+
+    private static string ScenarioFor(string kind) => kind switch
+    {
+        "showcase" => "showcase",
+        "consult" => "consult",
+        "open_question" => "open_question",
+        "bug" or "bug_report" => "bug",
+        "intro_draft" => "intro",
+        _ => throw new InvalidDataException("Unsupported brief kind")
+    };
 }
