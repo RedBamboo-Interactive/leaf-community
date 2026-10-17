@@ -1,0 +1,31 @@
+import { useCallback, useEffect, useState } from "react"
+
+type Settings={relayBaseUrl:string;credentialConfigured:boolean;connectionStatus:string;persona:string;avatar?:string;scenarioToggles:Record<string,boolean>;shareableFolders:string[];personalWords:string[];canaries:string[];novaDiscussionId?:string;linkAllowlist:string[];ownerUserId?:string;agentEntityId?:string}
+type Brief={id:string;kind:string;content:string;state:string}
+const base="/api/apps/leaf-commons"
+async function api<T>(path:string,init?:RequestInit):Promise<T>{const r=await fetch(base+path,{...init,headers:init?.body?{"Content-Type":"application/json",...init.headers}:init?.headers});const p=await r.json().catch(()=>({}));if(!r.ok)throw new Error(p.message??p.error??`HTTP ${r.status}`);return p as T}
+const lines=(v:string)=>v.split(/\r?\n/).map(x=>x.trim()).filter(Boolean)
+
+function Page(){
+  const [settings,setSettings]=useState<Settings|null>(null),[briefs,setBriefs]=useState<Brief[]>([]),[credential,setCredential]=useState(""),[notice,setNotice]=useState(""),[error,setError]=useState("")
+  const refresh=useCallback(async()=>{const [s,b]=await Promise.all([api<Settings>("/settings"),api<{items:Brief[]}>("/briefs")]);setSettings(s);setBriefs(b.items)},[])
+  useEffect(()=>{void refresh().catch(e=>setError(String(e.message??e)))},[refresh])
+  if(!settings)return <main className="commons"><h1>Nova Commons</h1><p>{error||"Loading…"}</p></main>
+  const update=(key:keyof Settings,value:unknown)=>setSettings({...settings,[key]:value})
+  async function save(){setError("");try{await api("/settings",{method:"PUT",body:JSON.stringify({...settings,credential:credential||undefined})});setCredential("");setNotice("Settings saved. Secret value was not returned.");await refresh()}catch(e){setError(String((e as Error).message))}}
+  async function decide(id:string,decision:string,content:string){try{const r=await api<{result?:{state:string;summary?:string}}>(`/briefs/${id}/decision`,{method:"POST",body:JSON.stringify({decision,content})});setNotice(r.result?.state==="blocked"?`Blocked locally: ${r.result.summary}. Nothing was sent.`:decision==="approved"?"Approved brief completed.":"Brief rejected.");await refresh()}catch(e){setError(String((e as Error).message))}}
+  async function rebuild(){try{const r=await api<{copied:number;excluded:unknown[]}>("/shareable/rebuild",{method:"POST"});setNotice(`Curated copy rebuilt: ${r.copied} files copied, ${r.excluded.length} excluded.`)}catch(e){setError(String((e as Error).message))}}
+  async function connect(){try{await save();const callback=`${window.location.origin}${base}/oauth/callback`;const r=await api<{authorizeUrl:string}>(`/oauth/start?callback=${encodeURIComponent(callback)}&scenarios=showcase,consult,bug`);window.location.assign(r.authorizeUrl)}catch(e){setError(String((e as Error).message))}}
+  return <main className="commons"><header><div><h1>Nova Commons</h1><p>Envoy connection, curated files, and owner handoff previews.</p></div><span className={`status ${settings.connectionStatus.replaceAll(" ","-")}`}>{settings.connectionStatus}</span></header>
+    {error&&<p className="error">{error}</p>}{notice&&<p className="notice">{notice}</p>}
+    <section><h2>Connection</h2><label>Relay URL<input value={settings.relayBaseUrl} onChange={e=>update("relayBaseUrl",e.target.value)}/></label><label>Envoy credential <small>{settings.credentialConfigured?"configured (encrypted)":"not configured"}</small><input type="password" autoComplete="new-password" value={credential} onChange={e=>setCredential(e.target.value)} placeholder="Leave blank to preserve"/></label><label>Persona<input value={settings.persona} onChange={e=>update("persona",e.target.value)}/></label><label>Avatar<input value={settings.avatar??""} onChange={e=>update("avatar",e.target.value)}/></label><button onClick={()=>void connect()}>Connect to Nova Commons</button></section>
+    <section><h2>Local safety</h2><fieldset><legend>Enabled scenarios</legend>{["showcase","consult","bug"].map(s=><label key={s}><input type="checkbox" checked={settings.scenarioToggles[s]??true} onChange={e=>update("scenarioToggles",{...settings.scenarioToggles,[s]:e.target.checked})}/>{s}</label>)}</fieldset><label>Shareable folders, one per line<textarea value={settings.shareableFolders.join("\n")} onChange={e=>update("shareableFolders",lines(e.target.value))}/></label><label>Personal words, one per line<textarea value={settings.personalWords.join("\n")} onChange={e=>update("personalWords",lines(e.target.value))}/></label><label>Canaries, one per line<textarea value={settings.canaries.join("\n")} onChange={e=>update("canaries",lines(e.target.value))}/></label><button onClick={rebuild}>Rebuild curated copy</button></section>
+    <section><h2>Digest delivery</h2><label>Owner Agent entity ID<input value={settings.agentEntityId??""} onChange={e=>update("agentEntityId",e.target.value)}/></label><label>Dedicated Nova discussion ID<input value={settings.novaDiscussionId??""} onChange={e=>update("novaDiscussionId",e.target.value)}/></label><label>Optional narrower link-host list <small>(cannot expand the relay allowlist)</small><textarea value={settings.linkAllowlist.join("\n")} onChange={e=>update("linkAllowlist",lines(e.target.value))}/></label></section>
+    <button className="primary" onClick={save}>Save settings</button>
+    <section><h2>Brief preview queue</h2>{briefs.length===0?<p>No briefs waiting.</p>:briefs.map(b=><BriefCard key={b.id} brief={b} decide={decide}/>)}</section>
+    <aside>Phase B is text only. Images and attachments are not accepted.</aside>
+  </main>
+}
+function BriefCard({brief,decide}:{brief:Brief;decide:(id:string,d:string,c:string)=>Promise<void>}){const [content,setContent]=useState(brief.content);return <article><strong>{brief.kind.replaceAll("_"," ")}</strong><span>{brief.state}</span><textarea value={content} disabled={brief.state!=="preview"} onChange={e=>setContent(e.target.value)}/>{brief.state==="preview"&&<div><button className="primary" onClick={()=>void decide(brief.id,"approved",content)}>Approve &amp; run</button><button onClick={()=>void decide(brief.id,"rejected",content)}>Reject</button></div>}</article>}
+
+export const plugin={id:"leaf-commons",routes:[{path:"commons",element:<Page/>}],settings:{}}

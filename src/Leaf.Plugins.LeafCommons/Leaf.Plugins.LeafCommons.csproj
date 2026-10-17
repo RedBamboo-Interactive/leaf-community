@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Leaf.Plugins.LeafCommons</RootNamespace>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <LeafSdkProject Condition="'$(LeafSdkProject)' == '' And Exists('..\..\..\redleaf\src\Leaf.Sdk\Leaf.Sdk.csproj')">..\..\..\redleaf\src\Leaf.Sdk\Leaf.Sdk.csproj</LeafSdkProject>
+  </PropertyGroup>
+  <ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App" /></ItemGroup>
+  <ItemGroup Condition="'$(LeafSdkProject)' == ''"><PackageReference Include="Leaf.Sdk" Version="0.1.*" /></ItemGroup>
+  <ItemGroup Condition="'$(LeafSdkProject)' != ''"><ProjectReference Include="$(LeafSdkProject)" /></ItemGroup>
+  <ItemGroup><EmbeddedResource Include="..\..\plugin.json" LogicalName="plugin.json" /></ItemGroup>
+</Project>

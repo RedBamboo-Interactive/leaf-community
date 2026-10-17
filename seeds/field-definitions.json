@@ -1,0 +1,23 @@
+[
+  {"parentType":"leaf-commons-settings","slug":"relay_base_url","name":"Relay base URL","fieldType":"string","sortOrder":0},
+  {"parentType":"leaf-commons-settings","slug":"envoy_credential","name":"Envoy credential","fieldType":"secret","sortOrder":1,"description":"Encrypted by RedLeaf; never returned by plugin APIs or logged"},
+  {"parentType":"leaf-commons-settings","slug":"connection_status","name":"Connection status","fieldType":"string","sortOrder":2},
+  {"parentType":"leaf-commons-settings","slug":"persona","name":"Persona","fieldType":"markdown","sortOrder":3},
+  {"parentType":"leaf-commons-settings","slug":"avatar","name":"Avatar","fieldType":"string","sortOrder":4},
+  {"parentType":"leaf-commons-settings","slug":"scenario_toggles","name":"Scenario toggles","fieldType":"json","sortOrder":5},
+  {"parentType":"leaf-commons-settings","slug":"shareable_folders","name":"Shareable folders","fieldType":"json","sortOrder":6},
+  {"parentType":"leaf-commons-settings","slug":"personal_words","name":"Personal words","fieldType":"json","sortOrder":7,"description":"Local-only outbound filter terms"},
+  {"parentType":"leaf-commons-settings","slug":"canaries","name":"Canaries","fieldType":"json","sortOrder":8,"description":"Local-only alarm strings"},
+  {"parentType":"leaf-commons-settings","slug":"nova_discussion_id","name":"Nova digest discussion","fieldType":"string","sortOrder":9},
+  {"parentType":"leaf-commons-settings","slug":"link_allowlist","name":"Digest link allowlist","fieldType":"json","sortOrder":10},
+  {"parentType":"leaf-commons-settings","slug":"owner_user_id","name":"Owner user ID","fieldType":"string","sortOrder":11},
+  {"parentType":"leaf-commons-settings","slug":"agent_entity_id","name":"Owner Agent entity ID","fieldType":"string","sortOrder":12},
+  {"parentType":"leaf-commons-brief","slug":"kind","name":"Kind","fieldType":"select","sortOrder":0,"constraints":"{\"options\":[\"showcase\",\"consult\",\"bug_report\",\"intro_draft\"]}"},
+  {"parentType":"leaf-commons-brief","slug":"content","name":"Content","fieldType":"markdown","sortOrder":1},
+  {"parentType":"leaf-commons-brief","slug":"state","name":"State","fieldType":"select","sortOrder":2,"constraints":"{\"options\":[\"preview\",\"approved\",\"rejected\",\"processed\"]}"},
+  {"parentType":"leaf-commons-brief","slug":"owner_id","name":"Owner","fieldType":"string","sortOrder":3},
+  {"parentType":"leaf-commons-brief","slug":"agent_id","name":"Agent","fieldType":"string","sortOrder":4},
+  {"parentType":"leaf-commons-audit","slug":"event","name":"Event","fieldType":"string","sortOrder":0},
+  {"parentType":"leaf-commons-audit","slug":"metadata","name":"Safe metadata","fieldType":"json","sortOrder":1},
+  {"parentType":"leaf-commons-audit","slug":"occurred_at","name":"Occurred at","fieldType":"string","sortOrder":2}
+]

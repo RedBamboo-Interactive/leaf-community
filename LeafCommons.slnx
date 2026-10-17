@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/Leaf.Plugins.LeafCommons/Leaf.Plugins.LeafCommons.csproj" />
+  <Project Path="tests/Leaf.Plugins.LeafCommons.Tests/Leaf.Plugins.LeafCommons.Tests.csproj" />
+</Solution>
