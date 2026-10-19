@@ -13,13 +13,17 @@ public sealed class CommonsRuntime(
         if (settings.ScenarioToggles.TryGetValue(toggle, out var enabled) && !enabled)
         {
             await state.RecordAsync("scenario_disabled", new Dictionary<string, object?> { ["scenario"] = toggle, ["thread"] = request.ThreadRef }, ct);
+            await state.RecordAsync("envoy_done", new Dictionary<string, object?>
+                { ["thread"] = request.ThreadRef, ["steps"] = 0, ["reason"] = "scenario_disabled" }, ct);
             return new("disabled", 0, toggle);
         }
         var runner = new EnvoyRunner(model, shareable, relay, filter, state, settings.PersonalWords, settings.Canaries);
         var result = await runner.RunAsync(request, ct);
         if (result.State == "blocked" && !string.IsNullOrWhiteSpace(request.ThreadRef))
             await digests.DeliverAsync(new("owner_notice", $"An Envoy post was blocked locally by rule `{result.Summary}`. No blocked content was sent.", request.ThreadRef), ct);
-        if (result.State != "blocked" && !string.IsNullOrWhiteSpace(request.ThreadRef) && !string.IsNullOrWhiteSpace(result.Summary))
+        if (result.State == "failed" && request.Addressed && !string.IsNullOrWhiteSpace(request.ThreadRef))
+            await digests.DeliverAsync(new("owner_notice", $"I couldn't answer thread {request.ThreadRef}: {result.Summary ?? "unknown_failure"}.", request.ThreadRef), ct);
+        if (result.State is not ("blocked" or "failed") && !string.IsNullOrWhiteSpace(request.ThreadRef) && !string.IsNullOrWhiteSpace(result.Summary))
         {
             var type = request.Kind == "owner_notice" ? "owner_notice" : request.Kind == "event" ? "announcement" : "consult_answer";
             await digests.DeliverAsync(new(type, result.Summary, request.ThreadRef), ct);

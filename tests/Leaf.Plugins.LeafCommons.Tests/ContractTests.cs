@@ -14,22 +14,42 @@ public sealed class ContractTests
     public async Task Generate_request_is_always_anthropic_direct_and_verified_tool_free()
     {
         var gateway = new CaptureGateway(HttpStatusCode.OK, "{\"success\":true,\"text\":\"{\\\"action\\\":\\\"done\\\"}\"}");
-        var result = await new ToolFreeModelClient(gateway).GenerateActionAsync("system", "prompt");
+        var result = await new ToolFreeModelClient(gateway).GenerateActionAsync("system", "prompt", new("thread-1", "ping-1"));
         using var body = JsonDocument.Parse(gateway.Body!);
         Assert.Equal("anthropic-direct", body.RootElement.GetProperty("provider").GetString());
         Assert.True(body.RootElement.GetProperty("requireToolFree").GetBoolean());
         Assert.Equal("oneshot", body.RootElement.GetProperty("mode").GetString());
+        Assert.False(body.RootElement.GetProperty("confidential").GetBoolean());
+        Assert.Equal("/ai-session/generate", gateway.RequestUri);
+        Assert.False(gateway.HadAuthorizationHeader);
+        Assert.False(gateway.HadProvenanceHeader);
+        Assert.Equal("Nova Commons Envoy: thread-1", gateway.JobName);
+        Assert.NotNull(gateway.Provenance);
+        Assert.Equal("leaf-commons", gateway.Provenance.Origin.App.Id);
+        Assert.Equal("service", gateway.Provenance.Actor.Kind);
+        Assert.Equal("commons-envoy", gateway.Provenance.Actor.Id);
+        Assert.Equal("system", gateway.Provenance.OnBehalfOf.Kind);
+        Assert.Equal(ComputeProvenanceAssurance.Asserted, gateway.Provenance.Assurance);
+        Assert.Contains(gateway.Provenance.Context, x => x.Kind == "external-conversation" && x.Id == "thread-1");
+        Assert.Contains(gateway.Provenance.Context, x => x.Kind == "relay-event" && x.Id == "ping-1");
         Assert.Equal("{\"action\":\"done\"}", result);
     }
 
     [Theory]
-    [InlineData(HttpStatusCode.UnprocessableEntity)]
-    [InlineData(HttpStatusCode.BadGateway)]
-    public async Task Generate_422_or_502_is_a_hard_failure_without_fallback(HttpStatusCode status)
+    [InlineData(HttpStatusCode.Forbidden, "gateway_forbidden")]
+    [InlineData(HttpStatusCode.UnprocessableEntity, "tool_free_unavailable")]
+    [InlineData(HttpStatusCode.BadGateway, "gateway_bad_gateway")]
+    public async Task Generate_failure_has_a_stable_reason_without_fallback(HttpStatusCode status, string reason)
     {
-        var gateway = new CaptureGateway(status, "{\"error\":\"failed\"}");
-        var error = await Assert.ThrowsAsync<ToolFreeGenerateException>(() => new ToolFreeModelClient(gateway).GenerateActionAsync("system", "prompt"));
-        Assert.Equal((int)status, error.Status); Assert.Equal(1, gateway.Calls);
+        var response = status == HttpStatusCode.UnprocessableEntity
+            ? "{\"error\":\"tool_free_unavailable\"}"
+            : "{\"error\":\"failed\"}";
+        var gateway = new CaptureGateway(status, response);
+        var error = await Assert.ThrowsAsync<ToolFreeGenerateException>(() =>
+            new ToolFreeModelClient(gateway).GenerateActionAsync("system", "prompt", new("thread-1", "ping-1")));
+        Assert.Equal((int)status, error.Status);
+        Assert.Equal(reason, error.ReasonCode);
+        Assert.Equal(1, gateway.Calls);
     }
 
     [Fact]
@@ -62,14 +82,16 @@ public sealed class ContractTests
     [Fact]
     public async Task Connector_core_deduplicates_and_acks_expired_items_without_dispatch()
     {
-        var handled = 0; var acked = new List<string>();
-        var core = new ConnectorCore((_, _) => { handled++; return Task.CompletedTask; });
+        var handled = new List<EnvoyRunRequest>(); var acked = new List<string>();
+        var core = new ConnectorCore((request, _) => { handled.Add(request); return Task.CompletedTask; });
         using var live = JsonDocument.Parse("{\"type\":\"ping\",\"id\":\"p1\",\"threadRef\":\"t1\",\"content\":\"question\"}");
         Assert.True(await core.ProcessAsync(live.RootElement, id => { acked.Add(id); return Task.CompletedTask; }));
         Assert.False(await core.ProcessAsync(live.RootElement, id => { acked.Add(id); return Task.CompletedTask; }));
         using var expired = JsonDocument.Parse("{\"type\":\"ping\",\"id\":\"p2\",\"threadRef\":\"t1\",\"content\":\"late\",\"expiresAt\":1}");
         Assert.False(await core.ProcessAsync(expired.RootElement, id => { acked.Add(id); return Task.CompletedTask; }));
-        Assert.Equal(1, handled); Assert.Equal(["p1", "p1", "p2"], acked);
+        Assert.Single(handled);
+        Assert.True(handled[0].Addressed);
+        Assert.Equal(["p1", "p1", "p2"], acked);
     }
 
     [Fact]
@@ -88,10 +110,22 @@ public sealed class ContractTests
 
 internal sealed class CaptureGateway(HttpStatusCode status, string response) : IComputeGateway
 {
-    public string? Body { get; private set; } public int Calls { get; private set; }
+    public string? Body { get; private set; }
+    public int Calls { get; private set; }
+    public string? RequestUri { get; private set; }
+    public string? JobName { get; private set; }
+    public bool HadAuthorizationHeader { get; private set; }
+    public bool HadProvenanceHeader { get; private set; }
+    public ComputeProvenance? Provenance { get; private set; }
     public async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, ComputeProvenance? provenance = null, CancellationToken ct = default)
     {
-        Calls++; Body = await request.Content!.ReadAsStringAsync(ct);
+        Calls++;
+        Body = await request.Content!.ReadAsStringAsync(ct);
+        RequestUri = request.RequestUri?.OriginalString;
+        JobName = request.Headers.TryGetValues("X-Job-Name", out var names) ? names.Single() : null;
+        HadAuthorizationHeader = request.Headers.Authorization is not null;
+        HadProvenanceHeader = request.Headers.Contains("X-Compute-Provenance");
+        Provenance = provenance;
         return new(status) { Content = JsonContent.Create(JsonDocument.Parse(response).RootElement) };
     }
 }

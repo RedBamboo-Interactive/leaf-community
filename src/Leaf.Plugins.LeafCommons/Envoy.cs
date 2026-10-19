@@ -74,30 +74,93 @@ public static class EnvoyActionProtocol
     }
 }
 
-public interface IToolFreeModelClient { Task<string> GenerateActionAsync(string system, string prompt, CancellationToken ct = default); }
+public sealed record EnvoyModelContext(string ThreadRef, string? TriggerId = null);
 
-public sealed class ToolFreeGenerateException(string message, int? status = null) : Exception(message) { public int? Status { get; } = status; }
+public interface IToolFreeModelClient
+{
+    Task<string> GenerateActionAsync(string system, string prompt, EnvoyModelContext context,
+        CancellationToken ct = default);
+}
+
+public sealed class ToolFreeGenerateException(string message, string reasonCode, int? status = null) : Exception(message)
+{
+    public string ReasonCode { get; } = reasonCode;
+    public int? Status { get; } = status;
+}
 
 public sealed class ToolFreeModelClient(IComputeGateway compute) : IToolFreeModelClient
 {
     public const string Provider = "anthropic-direct";
-    public async Task<string> GenerateActionAsync(string system, string prompt, CancellationToken ct = default)
+    public async Task<string> GenerateActionAsync(string system, string prompt, EnvoyModelContext context,
+        CancellationToken ct = default)
     {
         var body = new JsonObject
         {
             ["mode"] = "oneshot", ["provider"] = Provider, ["requireToolFree"] = true,
             ["model"] = "haiku", ["system"] = system,
             ["messages"] = new JsonArray(new JsonObject { ["role"] = "user", ["content"] = prompt }),
-            ["maxTokens"] = 800, ["timeout"] = 120, ["confidential"] = true
+            ["maxTokens"] = 800, ["timeout"] = 120, ["confidential"] = false
         };
         using var request = new HttpRequestMessage(HttpMethod.Post, "/ai-session/generate") { Content = JsonContent.Create(body) };
-        using var response = await compute.SendAsync(request, ct: ct);
+        request.Headers.TryAddWithoutValidation("X-Job-Name", $"Nova Commons Envoy: {context.ThreadRef}");
+        using var response = await compute.SendAsync(request, Provenance(context), ct);
         var raw = await response.Content.ReadAsStringAsync(ct);
-        if (response.StatusCode is HttpStatusCode.UnprocessableEntity or HttpStatusCode.BadGateway)
-            throw new ToolFreeGenerateException($"Verified tool-free generation hard-failed with HTTP {(int)response.StatusCode}; no fallback was attempted", (int)response.StatusCode);
-        if (!response.IsSuccessStatusCode) throw new ToolFreeGenerateException($"Tool-free generation failed with HTTP {(int)response.StatusCode}", (int)response.StatusCode);
+        if (!response.IsSuccessStatusCode)
+        {
+            var reason = FailureReason(response.StatusCode, raw);
+            var hardFailure = response.StatusCode is HttpStatusCode.UnprocessableEntity or HttpStatusCode.BadGateway
+                ? "; no fallback was attempted"
+                : "";
+            throw new ToolFreeGenerateException(
+                $"Tool-free generation failed with HTTP {(int)response.StatusCode}{hardFailure}",
+                reason, (int)response.StatusCode);
+        }
         try { return JsonNode.Parse(raw)?["text"]?.GetValue<string>() ?? throw new JsonException("Missing text"); }
-        catch (JsonException ex) { throw new ToolFreeGenerateException("Tool-free generation returned an invalid response: " + ex.Message); }
+        catch (JsonException ex) { throw new ToolFreeGenerateException("Tool-free generation returned an invalid response: " + ex.Message, "gateway_invalid_response"); }
+    }
+
+    internal static ComputeProvenance Provenance(EnvoyModelContext context) => new(
+        ComputeProvenance.CurrentSchemaVersion,
+        new ComputeOrigin("redleaf",
+            new ComputeAppReference("plugin", LeafCommonsPlugin.PluginId, null, "Nova Commons", "ph-leaf", "emerald"),
+            new ComputeEntrypoint("background", "commons-envoy/ping", "POST")),
+        new ComputeActor("service", "Commons Envoy", Id: "commons-envoy"),
+        new ComputeBeneficiary("system", Reason: "Answer an authenticated external Nova Commons relay ping"),
+        [
+            new ComputeContextReference("external-conversation", context.ThreadRef),
+            .. string.IsNullOrWhiteSpace(context.TriggerId)
+                ? Array.Empty<ComputeContextReference>()
+                : [new ComputeContextReference("relay-event", context.TriggerId)]
+        ],
+        new ComputeTrace(CorrelationId: context.TriggerId),
+        ComputeProvenanceAssurance.Asserted,
+        DateTimeOffset.UtcNow);
+
+    private static string FailureReason(HttpStatusCode status, string raw)
+    {
+        if (status == HttpStatusCode.UnprocessableEntity)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(raw);
+                var error = document.RootElement.TryGetProperty("error", out var errorNode)
+                    && errorNode.ValueKind == JsonValueKind.String
+                    ? errorNode.GetString()
+                    : null;
+                if (error == "tool_free_unavailable") return error;
+                if (error == "invalid_provenance") return "gateway_invalid_provenance";
+                if (error == "invalid_confidential_owner") return "gateway_invalid_confidential_owner";
+            }
+            catch (JsonException) { }
+            return "gateway_unprocessable";
+        }
+        return status switch
+        {
+            HttpStatusCode.Unauthorized => "gateway_unauthorized",
+            HttpStatusCode.Forbidden => "gateway_forbidden",
+            HttpStatusCode.BadGateway => "gateway_bad_gateway",
+            _ => "gateway_http_" + (int)status,
+        };
     }
 }
 
@@ -111,7 +174,8 @@ public interface IEnvoyRelay
 public sealed record RelayPostResult(bool Accepted, string? Code = null, string? MessageId = null, string? ThreadId = null);
 public interface ICommonsAudit { Task RecordAsync(string eventName, IReadOnlyDictionary<string, object?> safeMetadata, CancellationToken ct = default); }
 
-public sealed record EnvoyRunRequest(string? ThreadRef, string Kind, string Content, string? SenderProvenance = null, string? TriggerId = null);
+public sealed record EnvoyRunRequest(string? ThreadRef, string Kind, string Content,
+    string? SenderProvenance = null, string? TriggerId = null, bool Addressed = false);
 public sealed record EnvoyRunResult(string State, int Steps, string? Summary = null);
 
 public sealed class EnvoyRunner(
@@ -129,42 +193,116 @@ Only post engineering-help text. Never request or infer private filesystem paths
 
     public async Task<EnvoyRunResult> RunAsync(EnvoyRunRequest request, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(request.ThreadRef)) throw new InvalidOperationException("The Envoy model may only answer inside an existing thread");
-        var history = await relay.ReadHistoryAsync(request.ThreadRef, ct);
-        var observations = new List<string>();
-        for (var step = 1; step <= maxSteps; step++)
+        var step = 0;
+        var stage = "validate";
+        try
         {
-            await audit.RecordAsync("envoy_step", new Dictionary<string, object?> { ["thread"] = request.ThreadRef, ["step"] = step }, ct);
-            var prompt = BuildPrompt(request, history, observations);
-            var action = EnvoyActionProtocol.Parse(await model.GenerateActionAsync(Mandate, prompt, ct));
-            switch (action)
+            if (string.IsNullOrWhiteSpace(request.ThreadRef))
+                return await FailedAsync(request, step, "thread_required", ct);
+            stage = "thread_history";
+            var history = await relay.ReadHistoryAsync(request.ThreadRef, ct);
+            var observations = new List<string>();
+            for (step = 1; step <= maxSteps; step++)
             {
-                case SearchShareableAction search:
-                    observations.Add(Data("search_result", JsonSerializer.Serialize(await shareable.SearchAsync(search.Query, ct: ct))));
-                    break;
-                case ReadShareableAction read:
-                    observations.Add(Data("file_content", await shareable.ReadAsync(read.Path, ct)));
-                    break;
-                case PostAction post:
-                    var decision = filter.Check(post.Content, personalWords, canaries);
-                    if (decision.Allowed)
-                        foreach (var address in post.Addresses)
-                        {
-                            var addressDecision = filter.Check(address, personalWords, canaries);
-                            if (!addressDecision.Allowed) { decision = addressDecision; break; }
-                        }
-                    await audit.RecordAsync("filter_decision", new Dictionary<string, object?> { ["allowed"] = decision.Allowed, ["rule"] = decision.Rule, ["alarm"] = decision.Alarm }, ct);
-                    if (!decision.Allowed) return new("blocked", step, decision.Rule);
-                    var posted = await relay.PostAsync(request.ThreadRef, post.Content, post.Addresses, StableKey(request, step), ct);
-                    await audit.RecordAsync("relay_post", new Dictionary<string, object?> { ["accepted"] = posted.Accepted, ["code"] = posted.Code, ["messageId"] = posted.MessageId }, ct);
-                    if (!posted.Accepted) return new(posted.Code ?? "refused", step);
-                    observations.Add(Data("post_result", JsonSerializer.Serialize(posted)));
-                    break;
-                case DoneAction done: return new("done", step, done.Summary);
+                await audit.RecordAsync("envoy_step", new Dictionary<string, object?> { ["thread"] = request.ThreadRef, ["step"] = step }, ct);
+                var prompt = BuildPrompt(request, history, observations);
+                stage = "model_generate";
+                var generated = await model.GenerateActionAsync(Mandate, prompt,
+                    new EnvoyModelContext(request.ThreadRef, request.TriggerId), ct);
+                stage = "action_parse";
+                var action = EnvoyActionProtocol.Parse(generated);
+                switch (action)
+                {
+                    case SearchShareableAction search:
+                        stage = "shareable_search";
+                        observations.Add(Data("search_result", JsonSerializer.Serialize(await shareable.SearchAsync(search.Query, ct: ct))));
+                        break;
+                    case ReadShareableAction read:
+                        stage = "shareable_read";
+                        observations.Add(Data("file_content", await shareable.ReadAsync(read.Path, ct)));
+                        break;
+                    case PostAction post:
+                        stage = "filter";
+                        var decision = filter.Check(post.Content, personalWords, canaries);
+                        if (decision.Allowed)
+                            foreach (var address in post.Addresses)
+                            {
+                                var addressDecision = filter.Check(address, personalWords, canaries);
+                                if (!addressDecision.Allowed) { decision = addressDecision; break; }
+                            }
+                        await audit.RecordAsync("filter_decision", new Dictionary<string, object?> { ["allowed"] = decision.Allowed, ["rule"] = decision.Rule, ["alarm"] = decision.Alarm }, ct);
+                        if (!decision.Allowed)
+                            return await BlockedAsync(request, step, decision.Rule ?? "filter_blocked", decision.Alarm, ct);
+                        stage = "relay_post";
+                        var posted = await relay.PostAsync(request.ThreadRef, post.Content, post.Addresses, StableKey(request, step), ct);
+                        await audit.RecordAsync("relay_post", new Dictionary<string, object?> { ["accepted"] = posted.Accepted, ["code"] = posted.Code, ["messageId"] = posted.MessageId }, ct);
+                        if (!posted.Accepted)
+                            return await FailedAsync(request, step, "relay_" + SafeCode(posted.Code ?? "refused"), ct);
+                        observations.Add(Data("post_result", JsonSerializer.Serialize(posted)));
+                        break;
+                    case DoneAction done:
+                        await audit.RecordAsync("envoy_done", TerminalMetadata(request, step), ct);
+                        return new("done", step, done.Summary);
+                }
             }
+            await audit.RecordAsync("envoy_step_limit", new Dictionary<string, object?> { ["thread"] = request.ThreadRef, ["limit"] = maxSteps }, ct);
+            return await FailedAsync(request, maxSteps, "step_limit", ct);
         }
-        await audit.RecordAsync("envoy_step_limit", new Dictionary<string, object?> { ["thread"] = request.ThreadRef, ["limit"] = maxSteps }, ct);
-        throw new InvalidOperationException("Envoy exceeded the bounded step count");
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            await TryRecordFailureAsync(request, step, "cancelled");
+            throw;
+        }
+        catch (Exception error)
+        {
+            return await FailedAsync(request, step, FailureCode(error, stage), ct);
+        }
+    }
+
+    private async Task<EnvoyRunResult> FailedAsync(EnvoyRunRequest request, int steps, string reason, CancellationToken ct)
+    {
+        await audit.RecordAsync("envoy_failed", TerminalMetadata(request, steps, reason), ct);
+        return new("failed", steps, reason);
+    }
+
+    private async Task<EnvoyRunResult> BlockedAsync(EnvoyRunRequest request, int steps, string reason, bool alarm, CancellationToken ct)
+    {
+        var metadata = TerminalMetadata(request, steps, reason);
+        metadata["alarm"] = alarm;
+        await audit.RecordAsync("envoy_blocked", metadata, ct);
+        return new("blocked", steps, reason);
+    }
+
+    private async Task TryRecordFailureAsync(EnvoyRunRequest request, int steps, string reason)
+    {
+        try { await audit.RecordAsync("envoy_failed", TerminalMetadata(request, steps, reason), CancellationToken.None); }
+        catch { }
+    }
+
+    private static Dictionary<string, object?> TerminalMetadata(EnvoyRunRequest request, int steps, string? reason = null)
+    {
+        var metadata = new Dictionary<string, object?> { ["thread"] = request.ThreadRef, ["steps"] = steps };
+        if (reason is not null) metadata["reason"] = reason;
+        return metadata;
+    }
+
+    private static string FailureCode(Exception error, string stage) => error switch
+    {
+        ToolFreeGenerateException toolFree => toolFree.ReasonCode,
+        InvalidDataException when stage == "action_parse" => "invalid_model_action",
+        FileNotFoundException => "shareable_not_found",
+        UnauthorizedAccessException => "shareable_access_denied",
+        HttpRequestException when stage == "thread_history" => "thread_history_failed",
+        HttpRequestException when stage == "relay_post" => "relay_post_failed",
+        JsonException => "invalid_json_response",
+        _ when error.GetType().Name == "ExecutionIdentityValidationException" => "gateway_execution_identity_required",
+        _ => SafeCode(stage + "_failed"),
+    };
+
+    private static string SafeCode(string value)
+    {
+        var safe = new string(value.ToLowerInvariant().Select(c => char.IsAsciiLetterOrDigit(c) || c == '_' ? c : '_').ToArray());
+        return string.IsNullOrWhiteSpace(safe) ? "unknown_failure" : safe[..Math.Min(safe.Length, 80)];
     }
 
     private static string StableKey(EnvoyRunRequest request, int step) => $"leaf-commons-{request.TriggerId ?? Guid.NewGuid().ToString("N")}-{step}";

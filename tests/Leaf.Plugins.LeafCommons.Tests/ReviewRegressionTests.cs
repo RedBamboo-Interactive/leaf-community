@@ -49,9 +49,45 @@ public sealed class ReviewRegressionTests : IDisposable
     public async Task Envoy_model_cannot_open_a_thread()
     {
         var model = new CountingModel("{\"action\":\"post\",\"content\":\"anything\"}");
-        var runner = new EnvoyRunner(model, new ShareableStore(root), new FakeRelay(), new OutboundFilter(new SecretScanner()), new MemoryAudit(), [], []);
-        await Assert.ThrowsAsync<InvalidOperationException>(() => runner.RunAsync(new(null, "consult", "new thread")));
+        var audit = new MemoryAudit();
+        var runner = new EnvoyRunner(model, new ShareableStore(root), new FakeRelay(), new OutboundFilter(new SecretScanner()), audit, [], []);
+        var result = await runner.RunAsync(new(null, "consult", "new thread"));
+        Assert.Equal("failed", result.State);
+        Assert.Equal("thread_required", result.Summary);
+        Assert.Contains(audit.Events, x => x.Name == "envoy_failed" && Equals(x.Data["reason"], "thread_required"));
         Assert.Equal(0, model.Calls);
+    }
+
+    [Theory]
+    [InlineData(403, "gateway_forbidden")]
+    [InlineData(422, "tool_free_unavailable")]
+    [InlineData(502, "gateway_bad_gateway")]
+    public async Task Addressed_model_failure_is_audited_and_delivers_owner_notice(int status, string reason)
+    {
+        var entities = new MemoryEntityStore();
+        var state = new CommonsStateStore(entities);
+        await state.SaveSettingsAsync(new(null, "https://relay.example", "credential", "active", "Nova", null,
+            new Dictionary<string, bool> { ["consult"] = true }, [], [], [], "digest-1", [], "owner-1", "agent-1"));
+        var model = new ThrowingModel(new ToolFreeGenerateException("fixture failure", reason, status));
+        var digests = new CapturingDigestSink();
+        var runtime = new CommonsRuntime(model, new ShareableStore(root), new FakeRelay(),
+            new OutboundFilter(new SecretScanner()), state, digests);
+
+        var result = await runtime.HandleAsync(new("thread-1", "consult", "what is 2 + 2?",
+            TriggerId: "ping-1", Addressed: true));
+
+        Assert.Equal("failed", result.State);
+        Assert.Equal(reason, result.Summary);
+        var audits = await entities.QueryAsync(new EntityQuery { TypeSlug = "leaf-commons-audit" });
+        Assert.Contains(audits, x => x.Data["event"]?.GetValue<string>() == "envoy_step"
+            && x.Data["metadata"]?["step"]?.GetValue<int>() == 1);
+        Assert.Contains(audits, x => x.Data["event"]?.GetValue<string>() == "envoy_failed"
+            && x.Data["metadata"]?["reason"]?.GetValue<string>() == reason
+            && x.Data["metadata"]?["thread"]?.GetValue<string>() == "thread-1");
+        var notice = Assert.Single(digests.Items);
+        Assert.Equal("owner_notice", notice.Type);
+        Assert.Equal("thread-1", notice.ThreadRef);
+        Assert.Equal($"I couldn't answer thread thread-1: {reason}.", notice.Content);
     }
 
     [Fact]
@@ -154,12 +190,29 @@ public sealed class ReviewRegressionTests : IDisposable
 internal sealed class CountingModel(string response) : IToolFreeModelClient
 {
     public int Calls { get; private set; }
-    public Task<string> GenerateActionAsync(string system, string prompt, CancellationToken ct = default) { Calls++; return Task.FromResult(response); }
+    public Task<string> GenerateActionAsync(string system, string prompt, EnvoyModelContext context,
+        CancellationToken ct = default) { Calls++; return Task.FromResult(response); }
+}
+
+internal sealed class ThrowingModel(Exception error) : IToolFreeModelClient
+{
+    public Task<string> GenerateActionAsync(string system, string prompt, EnvoyModelContext context,
+        CancellationToken ct = default) => Task.FromException<string>(error);
 }
 
 internal sealed class NullDigestSink : IDigestSink
 {
     public Task DeliverAsync(CommonsDigest digest, CancellationToken ct = default) => Task.CompletedTask;
+}
+
+internal sealed class CapturingDigestSink : IDigestSink
+{
+    public List<CommonsDigest> Items { get; } = [];
+    public Task DeliverAsync(CommonsDigest digest, CancellationToken ct = default)
+    {
+        Items.Add(digest);
+        return Task.CompletedTask;
+    }
 }
 
 internal sealed class TestAuth(string? userId, params string[] roles) : IAuthContext

@@ -4,6 +4,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.Extensions.Logging;
 
 namespace Leaf.Plugins.LeafCommons;
 
@@ -113,14 +114,15 @@ public sealed class ConnectorCore(Func<EnvoyRunRequest, CancellationToken, Task>
             var content = frame.TryGetProperty("content", out var contentNode) ? contentNode.GetString() ?? "" : frame.TryGetProperty("reason", out var reason) ? reason.GetString() ?? "owner notice" : "owner notice";
             var kind = type == "ping" && frame.TryGetProperty("scenario", out var scenario) ? scenario.GetString() ?? "consult_reply" : type;
             var sender = frame.TryGetProperty("sender", out var senderNode) ? senderNode.GetRawText() : null;
-            await handler(new(thread, kind, content, sender, id), ct);
+            await handler(new(thread, kind, content, sender, id, Addressed: type == "ping"), ct);
         }
         await ack(id);
         return true;
     }
 }
 
-public sealed class RelayConnector(Func<(Uri BaseUri, string? Credential)> settings, ConnectorCore core, CommonsStateStore state) : IAsyncDisposable
+public sealed class RelayConnector(Func<(Uri BaseUri, string? Credential)> settings, ConnectorCore core,
+    CommonsStateStore state, ILogger<RelayConnector> logger) : IAsyncDisposable
 {
     private readonly SemaphoreSlim single = new(1, 1);
     private CancellationTokenSource? running;
@@ -143,7 +145,13 @@ public sealed class RelayConnector(Func<(Uri BaseUri, string? Credential)> setti
             {
                 try { await ConnectOnceAsync(ct); delay = TimeSpan.FromSeconds(1); }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
-                catch { await SetStatusAsync("reconnecting", ct); await Task.Delay(delay + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 500)), ct); delay = TimeSpan.FromSeconds(Math.Min(30, delay.TotalSeconds * 2)); }
+                catch (Exception error)
+                {
+                    logger.LogError(error, "Commons connector iteration failed");
+                    await SetStatusAsync("reconnecting", ct);
+                    await Task.Delay(delay + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 500)), ct);
+                    delay = TimeSpan.FromSeconds(Math.Min(30, delay.TotalSeconds * 2));
+                }
             }
         }
         finally { single.Release(); }
