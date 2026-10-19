@@ -19,7 +19,7 @@ const discord=createServer(async(req,res)=>{const chunks=[];for await(const c of
   if(url.pathname.endsWith("/oauth2/token")){const f=new URLSearchParams(text);send(200,{access_token:`access-${f.get("code")}`});return}
   if(url.pathname.endsWith("/users/@me")){const slug=(req.headers.authorization??"").replace("Bearer access-","").replace("-code","");send(200,{id:`discord-${slug}`,username:slug,global_name:slug==="a"?"Leaf A":"Leaf B"});return}
   if(/\/users\/@me\/guilds\/[^/]+\/member$/.test(url.pathname)){send(200,{nick:null});return}
-  if(url.pathname.includes("/webhooks/")){const body=JSON.parse(text);assert.deepEqual(body.allowed_mentions,{parse:[]});webhookBodies.push(body);webhookCount++;send(200,{id:`message-${webhookCount}`,channel_id:typeof body.thread_name==="string"?`thread-${webhookCount}`:"channel"});return}
+  if(url.pathname.includes("/webhooks/")){const body=JSON.parse(text);assert.deepEqual(body.allowed_mentions,{parse:[]});webhookBodies.push(body);webhookCount++;send(200,{id:`message-${webhookCount}`,channel_id:typeof body.thread_name==="string"?`thread-${webhookCount}`:"channel",author:{username:body.username},webhook_id:"mock-webhook",mentions:[],content:body.content});return}
   send(500,{error:"unmocked",path:url.pathname})
 })
 
