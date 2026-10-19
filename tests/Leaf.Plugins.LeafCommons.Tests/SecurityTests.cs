@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net;
 using System.Security.Claims;
 using System.Text;
@@ -28,10 +27,104 @@ public sealed class SecurityTests : IDisposable
         var destination = Path.Combine(root, "copy"); var builder = new ShareableSetBuilder(new SecretScanner(), 100);
         var first = await builder.BuildAsync([source], destination); var second = await builder.BuildAsync([source], destination);
         Assert.True(first.Copied == 2, $"copied={first.Copied}; excluded={string.Join(';', first.Excluded.Select(x => Path.GetFileName(x.Source) + ':' + x.Reason))}"); Assert.Equal(first.Copied, second.Copied);
-        Assert.Contains(first.Excluded, x => x.Reason == "git-ignored"); Assert.Contains(first.Excluded, x => x.Reason.StartsWith("secret:"));
+        Assert.Contains(first.Excluded, x => x.Reason.StartsWith("secret:"));
         Assert.Contains(first.Excluded, x => x.Reason == "binary"); Assert.Contains(first.Excluded, x => x.Reason == "too-large");
         Assert.DoesNotContain(Directory.EnumerateFiles(destination, "*", SearchOption.AllDirectories), x => x.Contains(Path.DirectorySeparatorChar + ".git" + Path.DirectorySeparatorChar));
+        Assert.False(File.Exists(Path.Combine(destination, new DirectoryInfo(source).Name, "ignored.txt")));
         Assert.Equal("public class OrdinaryEngineeringText {}\n", await new ShareableStore(destination).ReadAsync(new DirectoryInfo(source).Name + "/ok.cs"));
+    }
+
+    [Fact]
+    public void Process_launcher_is_hidden_and_redirects_both_streams()
+    {
+        var startInfo = ProcessLauncher.CreateStartInfo("git", ["status"], root);
+        Assert.True(startInfo.CreateNoWindow);
+        Assert.False(startInfo.UseShellExecute);
+        Assert.True(startInfo.RedirectStandardOutput);
+        Assert.True(startInfo.RedirectStandardError);
+        Assert.Equal(root, startInfo.WorkingDirectory);
+        Assert.Equal(["status"], startInfo.ArgumentList);
+    }
+
+    [Fact]
+    public async Task Git_roots_use_exactly_one_listing_process_each()
+    {
+        var first = CreateFakeGitRoot("first");
+        var second = CreateFakeGitRoot("second");
+        var launcher = new RecordingProcessLauncher("ok.txt\0");
+        var destination = Path.Combine(root, "copy");
+        var builder = new ShareableSetBuilder(new SecretScanner(), processLauncher: launcher);
+
+        var result = await builder.BuildAsync([first, second], destination);
+
+        Assert.Equal(2, result.Copied);
+        Assert.Equal(2, launcher.Invocations.Count);
+        Assert.All(launcher.Invocations, invocation =>
+        {
+            Assert.Equal("git", invocation.FileName);
+            Assert.Equal(["-C", invocation.Arguments[1], "ls-files", "-z", "--cached", "--others", "--exclude-standard"], invocation.Arguments);
+        });
+        Assert.Equal([first, second], launcher.Invocations.Select(x => x.Arguments[1]));
+    }
+
+    [Fact]
+    public async Task Non_git_fallback_never_enters_skipped_directories()
+    {
+        var source = Path.Combine(root, "plain");
+        Directory.CreateDirectory(source);
+        await File.WriteAllTextAsync(Path.Combine(source, "ok.txt"), "ordinary engineering text");
+        var modules = Path.Combine(source, "node_modules");
+        Directory.CreateDirectory(modules);
+        for (var i = 0; i < 250; i++)
+            await File.WriteAllTextAsync(Path.Combine(modules, $"package-{i}.js"), "ignored dependency");
+        var enumerator = new CountingFileTreeEnumerator();
+        var destination = Path.Combine(root, "copy");
+        var builder = new ShareableSetBuilder(new SecretScanner(), fileTree: enumerator);
+
+        var result = await builder.BuildAsync([source], destination);
+
+        Assert.Equal(1, result.Copied);
+        Assert.DoesNotContain(enumerator.EnumeratedFileDirectories,
+            path => string.Equals(path, modules, StringComparison.OrdinalIgnoreCase));
+        Assert.False(Directory.Exists(Path.Combine(destination, "plain", "node_modules")));
+    }
+
+    [Fact]
+    public async Task Non_git_fallback_cap_fails_without_replacing_previous_copy()
+    {
+        var source = Path.Combine(root, "plain");
+        Directory.CreateDirectory(source);
+        for (var i = 0; i < 3; i++) await File.WriteAllTextAsync(Path.Combine(source, $"{i}.txt"), "ordinary");
+        var destination = Path.Combine(root, "copy");
+        Directory.CreateDirectory(destination);
+        var sentinel = Path.Combine(destination, "previous.txt");
+        await File.WriteAllTextAsync(sentinel, "keep me");
+        var builder = new ShareableSetBuilder(new SecretScanner(), fallbackFileLimit: 2);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => builder.BuildAsync([source], destination));
+
+        Assert.Contains("file cap of 2", error.Message);
+        Assert.Equal("keep me", await File.ReadAllTextAsync(sentinel));
+        Assert.Empty(Directory.EnumerateDirectories(root, "copy.building-*"));
+    }
+
+    [Fact]
+    public async Task Git_failure_is_clear_and_keeps_previous_copy()
+    {
+        var source = CreateFakeGitRoot("source");
+        var destination = Path.Combine(root, "copy");
+        Directory.CreateDirectory(destination);
+        var sentinel = Path.Combine(destination, "previous.txt");
+        await File.WriteAllTextAsync(sentinel, "keep me");
+        var launcher = new RecordingProcessLauncher([], 128, "fatal: fixture failure");
+        var builder = new ShareableSetBuilder(new SecretScanner(), processLauncher: launcher);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => builder.BuildAsync([source], destination));
+
+        Assert.Contains("git ls-files failed", error.Message);
+        Assert.Contains("exit code 128", error.Message);
+        Assert.Equal("keep me", await File.ReadAllTextAsync(sentinel));
+        Assert.Single(launcher.Invocations);
     }
 
     [Theory]
@@ -108,7 +201,42 @@ public sealed class SecurityTests : IDisposable
         Assert.Empty(relay.Posts);
     }
 
-    private static void RunGit(string cwd, string arg) { using var p = Process.Start(new ProcessStartInfo("git", arg) { WorkingDirectory = cwd, UseShellExecute = false })!; p.WaitForExit(); Assert.Equal(0, p.ExitCode); }
+    private string CreateFakeGitRoot(string name)
+    {
+        var path = Path.Combine(root, name);
+        Directory.CreateDirectory(Path.Combine(path, ".git"));
+        File.WriteAllText(Path.Combine(path, "ok.txt"), "ordinary engineering text");
+        return path;
+    }
+
+    private static void RunGit(string cwd, params string[] arguments)
+    {
+        var result = new ProcessLauncher().RunAsync("git", arguments, cwd).GetAwaiter().GetResult();
+        Assert.True(result.ExitCode == 0, result.StandardError);
+    }
+}
+
+internal sealed class RecordingProcessLauncher(byte[] output, int exitCode = 0, string standardError = "") : IProcessLauncher
+{
+    public RecordingProcessLauncher(string output) : this(Encoding.UTF8.GetBytes(output)) { }
+    public List<(string FileName, IReadOnlyList<string> Arguments, string? WorkingDirectory)> Invocations { get; } = [];
+    public Task<ProcessExecutionResult> RunAsync(string fileName, IReadOnlyList<string> arguments,
+        string? workingDirectory = null, CancellationToken ct = default)
+    {
+        Invocations.Add((fileName, arguments.ToArray(), workingDirectory));
+        return Task.FromResult(new ProcessExecutionResult(exitCode, output, standardError));
+    }
+}
+
+internal sealed class CountingFileTreeEnumerator : IFileTreeEnumerator
+{
+    public List<string> EnumeratedFileDirectories { get; } = [];
+    public IEnumerable<string> EnumerateDirectories(string path) => Directory.EnumerateDirectories(path);
+    public IEnumerable<string> EnumerateFiles(string path)
+    {
+        EnumeratedFileDirectories.Add(path);
+        return Directory.EnumerateFiles(path);
+    }
 }
 
 internal sealed class ScriptedModel(IEnumerable<string> actions) : IToolFreeModelClient
