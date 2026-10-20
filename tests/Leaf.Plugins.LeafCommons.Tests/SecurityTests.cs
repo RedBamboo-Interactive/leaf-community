@@ -288,6 +288,58 @@ public sealed class SecurityTests : IDisposable
         Assert.Contains("shared engineering material", relay.Posts[0]);
     }
 
+    [Fact]
+    public async Task Addressed_absolute_path_reply_gets_one_content_free_correction_then_safe_fallback()
+    {
+        var copy = Path.Combine(root, "copy"); Directory.CreateDirectory(copy);
+        const string blocked = "Refuse with del C:\\private.txt";
+        var unsafeAction = JsonSerializer.Serialize(new { action = "post", content = blocked });
+        var model = new PromptCapturingModel([unsafeAction, unsafeAction]);
+        var relay = new FakeRelay();
+        var audit = new MemoryAudit();
+        var runner = new EnvoyRunner(model, new ShareableStore(copy), relay,
+            new OutboundFilter(new SecretScanner()), audit, [], []);
+
+        var result = await runner.RunAsync(new("thread", "ping", "question", Addressed: true));
+
+        Assert.Equal("blocked", result.State);
+        Assert.Equal("absolute-path", result.Summary);
+        Assert.Equal(2, model.Prompts.Count);
+        Assert.Contains("blocked for: absolute path", model.Prompts[1]);
+        Assert.DoesNotContain(blocked, model.Prompts[1]);
+        Assert.Equal([EnvoyRunner.CoverageFallback], relay.Posts);
+        Assert.Contains(audit.Events, x => x.Name == "envoy_blocked"
+            && Equals(x.Data["reason"], "absolute-path"));
+    }
+
+    [Fact]
+    public async Task Addressed_relay_link_rejection_gets_one_content_free_correction_then_safe_fallback()
+    {
+        var copy = Path.Combine(root, "copy"); Directory.CreateDirectory(copy);
+        const string rejected = "See https://not-allowed.example/private";
+        var rejectedAction = JsonSerializer.Serialize(new { action = "post", content = rejected });
+        var model = new PromptCapturingModel([rejectedAction, rejectedAction]);
+        var relay = new ScriptedPostRelay([
+            new(false, "relay_link_not_allowed"),
+            new(false, "relay_link_not_allowed"),
+            new(true, MessageId: "fallback")
+        ]);
+        var audit = new MemoryAudit();
+        var runner = new EnvoyRunner(model, new ShareableStore(copy), relay,
+            new OutboundFilter(new SecretScanner()), audit, [], []);
+
+        var result = await runner.RunAsync(new("thread", "ping", "question", Addressed: true));
+
+        Assert.Equal("failed", result.State);
+        Assert.Equal("relay_link_not_allowed", result.Summary);
+        Assert.Equal(2, model.Prompts.Count);
+        Assert.Contains("rejected for: non-allowlisted link", model.Prompts[1]);
+        Assert.DoesNotContain(rejected, model.Prompts[1]);
+        Assert.Equal([rejected, rejected, EnvoyRunner.CoverageFallback], relay.Posts);
+        Assert.Contains(audit.Events, x => x.Name == "envoy_failed"
+            && Equals(x.Data["reason"], "relay_link_not_allowed"));
+    }
+
     [Theory]
     [InlineData("My zephyr-private note", "personal-word", false)]
     [InlineData("CANARY-12345", "canary", true)]
@@ -407,6 +459,23 @@ internal sealed class FakeRelay : IEnvoyRelay
     public Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<RelayMessage>>([]);
     public Task<RelayPostResult> PostAsync(string threadRef, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default) { Posts.Add(content); return Task.FromResult(new RelayPostResult(true, MessageId: "m1")); }
     public Task<RelayPostResult> OpenAsync(string scenario, string? threadName, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default) { Posts.Add(content); Opened.Add((scenario, threadName, content, addresses ?? [])); return Task.FromResult(new RelayPostResult(true, MessageId: "m1", ThreadId: "t1")); }
+}
+internal sealed class ScriptedPostRelay(IEnumerable<RelayPostResult> results) : IEnvoyRelay
+{
+    private readonly Queue<RelayPostResult> results = new(results);
+    public List<string> Posts { get; } = [];
+    public Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default) =>
+        Task.FromResult<IReadOnlyList<RelayMessage>>([]);
+    public Task<RelayPostResult> PostAsync(string threadRef, string content,
+        IReadOnlyList<string>? addresses = null, string? idempotencyKey = null,
+        CancellationToken ct = default)
+    {
+        Posts.Add(content);
+        return Task.FromResult(results.Dequeue());
+    }
+    public Task<RelayPostResult> OpenAsync(string scenario, string? threadName, string content,
+        IReadOnlyList<string>? addresses = null, string? idempotencyKey = null,
+        CancellationToken ct = default) => throw new NotSupportedException();
 }
 internal sealed class MemoryAudit : ICommonsAudit
 {

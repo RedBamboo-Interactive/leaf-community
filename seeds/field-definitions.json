@@ -26,5 +26,10 @@
   {"parentType":"leaf-commons-oauth-state","slug":"allow_active_overwrite","name":"Explicit re-join","fieldType":"boolean","sortOrder":4},
   {"parentType":"leaf-commons-audit","slug":"event","name":"Event","fieldType":"string","sortOrder":0},
   {"parentType":"leaf-commons-audit","slug":"metadata","name":"Safe metadata","fieldType":"json","sortOrder":1},
-  {"parentType":"leaf-commons-audit","slug":"occurred_at","name":"Occurred at","fieldType":"string","sortOrder":2}
+  {"parentType":"leaf-commons-audit","slug":"occurred_at","name":"Occurred at","fieldType":"string","sortOrder":2},
+  {"parentType":"leaf-commons-digest","slug":"digest_type","name":"Digest type","fieldType":"select","sortOrder":0,"constraints":"{\"options\":[\"consult_answer\",\"announcement\",\"owner_notice\"]}"},
+  {"parentType":"leaf-commons-digest","slug":"content","name":"Quoted content","fieldType":"markdown","sortOrder":1},
+  {"parentType":"leaf-commons-digest","slug":"thread_ref","name":"Commons thread","fieldType":"string","sortOrder":2},
+  {"parentType":"leaf-commons-digest","slug":"read","name":"Read","fieldType":"boolean","sortOrder":3},
+  {"parentType":"leaf-commons-digest","slug":"created_at","name":"Created at","fieldType":"string","sortOrder":4}
 ]

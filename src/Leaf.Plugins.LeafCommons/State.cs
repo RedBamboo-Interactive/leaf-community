@@ -25,6 +25,10 @@ public sealed record CommonsSettings(
     };
 }
 
+public sealed record StoredDigest(
+    Guid Id, string Type, string Content, string ThreadRef, bool Read,
+    DateTimeOffset CreatedAt);
+
 public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
 {
     private static readonly TimeSpan OAuthStateLifetime = TimeSpan.FromMinutes(10);
@@ -63,6 +67,48 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
 
     public Task<IReadOnlyList<LeafEntity>> ListBriefsAsync(CancellationToken ct = default) =>
         entities.QueryAsync(new EntityQuery { TypeSlug = "leaf-commons-brief", OrderById = true, Limit = 200 }, ct);
+
+    public async Task<StoredDigest> StoreDigestAsync(
+        string type, string content, string threadRef, CancellationToken ct = default)
+    {
+        if (type is not ("consult_answer" or "announcement" or "owner_notice"))
+            throw new ArgumentException("Unknown digest type", nameof(type));
+        if (string.IsNullOrWhiteSpace(content) || content.Length > 1200)
+            throw new ArgumentException("Digest content must be 1-1200 characters", nameof(content));
+        if (string.IsNullOrWhiteSpace(threadRef) || threadRef.Length > 200)
+            throw new ArgumentException("Digest thread reference must be 1-200 characters", nameof(threadRef));
+        var createdAt = DateTimeOffset.UtcNow;
+        var entity = await entities.CreateAsync("leaf-commons-digest", $"{type.Replace('_', ' ')} digest", new JsonObject
+        {
+            ["digest_type"] = type,
+            ["content"] = content,
+            ["thread_ref"] = threadRef,
+            ["read"] = false,
+            ["created_at"] = createdAt.ToString("O")
+        }, ct);
+        return ToDigest(entity);
+    }
+
+    public async Task<IReadOnlyList<StoredDigest>> ListDigestsAsync(
+        bool unreadOnly = false, CancellationToken ct = default)
+    {
+        var entitiesFound = await entities.QueryAsync(new EntityQuery
+            { TypeSlug = "leaf-commons-digest", Limit = 500 }, ct);
+        return entitiesFound.Select(ToDigest)
+            .Where(x => !unreadOnly || !x.Read)
+            .OrderByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .ToArray();
+    }
+
+    public async Task<StoredDigest> MarkDigestReadAsync(Guid id, CancellationToken ct = default)
+    {
+        var entity = await entities.GetAsync(id, ct) ?? throw new KeyNotFoundException("Digest not found");
+        if (entity.TypeSlug != "leaf-commons-digest") throw new KeyNotFoundException("Digest not found");
+        if (entity.Data["read"]?.GetValue<bool>() != true)
+            entity = await entities.PatchAsync(id, new JsonObject { ["read"] = true }, ct: ct);
+        return ToDigest(entity);
+    }
 
     public async Task<LeafEntity> DecideBriefAsync(Guid id, string decision, string? editedContent, string? editedTitle, IReadOnlyList<string>? editedAddresses, string ownerId, CancellationToken ct = default)
     {
@@ -144,6 +190,15 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
     private static string? S(JsonObject d, string key) => d[key]?.GetValue<string>();
     private static IReadOnlyList<string> List(JsonNode? n) => n is JsonArray a ? a.Select(x => x?.GetValue<string>()).Where(x => x is not null).Cast<string>().ToArray() : [];
     private static IReadOnlyDictionary<string, bool> Dict(JsonNode? n) => n is JsonObject o ? o.ToDictionary(x => x.Key, x => x.Value?.GetValue<bool>() ?? false) : new Dictionary<string, bool>();
+    private static StoredDigest ToDigest(LeafEntity entity)
+    {
+        var createdAt = DateTimeOffset.TryParse(S(entity.Data, "created_at"), out var parsed)
+            ? parsed
+            : entity.CreatedAt;
+        return new(entity.Id, S(entity.Data, "digest_type") ?? "owner_notice",
+            S(entity.Data, "content") ?? "", S(entity.Data, "thread_ref") ?? "unknown",
+            entity.Data["read"]?.GetValue<bool>() == true, createdAt);
+    }
     private static void ValidateTitle(string kind, string? title)
     {
         if (kind is "consult" or "open_question" or "bug" or "bug_report")

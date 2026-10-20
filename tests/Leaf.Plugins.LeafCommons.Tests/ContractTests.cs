@@ -11,6 +11,19 @@ namespace Leaf.Plugins.LeafCommons.Tests;
 public sealed class ContractTests
 {
     [Fact]
+    public void Manifest_contributes_digest_context_without_system_token_permission()
+    {
+        var manifest = new LeafCommonsPlugin().Manifest;
+        var extension = Assert.Single(manifest.Backend!.Extensions);
+        Assert.Equal(CommonsNovaContextExtension.ExtensionId, extension.Id);
+        Assert.Equal("nova", extension.Target);
+        Assert.Equal("context-contributor", extension.Slot);
+        Assert.Equal(PluginExtensionContracts.ContextFragmentV1, extension.Contract);
+        Assert.DoesNotContain(manifest.Permissions,
+            permission => permission.Kind == "os" && permission.Target == "issue-system-execution-token");
+    }
+
+    [Fact]
     public async Task Generate_request_is_always_anthropic_direct_and_verified_tool_free()
     {
         var gateway = new CaptureGateway(HttpStatusCode.OK, "{\"success\":true,\"text\":\"{\\\"action\\\":\\\"done\\\"}\"}");

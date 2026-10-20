@@ -64,6 +64,19 @@ public static class CommonsEndpoints
         {
             var settings = await store.GetSettingsAsync(ct); return IsOwner(auth, settings) ? Results.Ok(new { items = (await store.ListBriefsAsync(ct)).Select(x => new { id = x.Id, kind = x.Data["kind"], title = x.Data["title"], content = x.Data["content"], addresses = x.Data["addresses"], state = x.Data["state"] }) }) : Forbidden();
         });
+        group.MapGet("/digests", async (IAuthContext auth, CommonsStateStore store, CancellationToken ct) =>
+        {
+            var settings = await store.GetSettingsAsync(ct);
+            if (!IsOwner(auth, settings)) return Forbidden();
+            return Results.Ok(new { items = await store.ListDigestsAsync(ct: ct) });
+        });
+        group.MapPost("/digests/{id:guid}/read", async (Guid id, IAuthContext auth, CommonsStateStore store, CancellationToken ct) =>
+        {
+            var settings = await store.GetSettingsAsync(ct);
+            if (!IsOwner(auth, settings)) return Forbidden();
+            try { return Results.Ok(await store.MarkDigestReadAsync(id, ct)); }
+            catch (KeyNotFoundException) { return Results.NotFound(new { error = "digest_not_found" }); }
+        });
         group.MapPost("/briefs/{id:guid}/decision", async (Guid id, BriefDecisionRequest request, IAuthContext auth, CommonsStateStore store, CommonsRuntime runtime, CancellationToken ct) =>
         {
             var settings = await store.GetSettingsAsync(ct); if (!IsOwner(auth, settings) || string.IsNullOrWhiteSpace(auth.UserId)) return Forbidden();

@@ -7,7 +7,17 @@
   "icon": "ph-leaf",
   "color": "emerald",
   "requires": ["entities", "records", "discussions", "nova"],
-  "backend": { "assembly": "Leaf.Plugins.LeafCommons" },
+  "backend": {
+    "assembly": "Leaf.Plugins.LeafCommons",
+    "extensions": [{
+      "id": "nova-unread-digests",
+      "target": "nova",
+      "slot": "context-contributor",
+      "contract": "leaf.context-fragment/1",
+      "order": 60,
+      "description": "Contributes a bounded owner-scoped summary of unread quoted Commons digests"
+    }]
+  },
   "frontend": {
     "package": "leaf-commons-web",
     "settings": {},
@@ -27,7 +37,6 @@
     }]
   },
   "permissions": [
-    { "kind": "net", "target": "127.0.0.1", "reason": "Owner-configured local relay and RedLeaf/RedCompute loopback APIs" },
-    { "kind": "os", "target": "issue-system-execution-token", "reason": "Deliver a typed digest into the configured system-readable Nova discussion" }
+    { "kind": "net", "target": "127.0.0.1", "reason": "Owner-configured local relay and RedLeaf/RedCompute loopback APIs" }
   ]
 }

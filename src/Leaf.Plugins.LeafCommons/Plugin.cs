@@ -23,15 +23,23 @@ public sealed class LeafCommonsPlugin : ILeafPlugin
         services.AddSingleton<ICommonsAudit>(sp => sp.GetRequiredService<CommonsStateStore>());
         services.AddSingleton<IToolFreeModelClient, ToolFreeModelClient>();
         services.AddSingleton<Func<(Uri BaseUri, string? Credential)>>(sp => () => { var settings = sp.GetRequiredService<CommonsStateStore>().GetSettingsAsync().GetAwaiter().GetResult(); return (new Uri(settings.RelayBaseUrl), settings.Credential); });
-        services.AddHttpClient("commons-relay"); services.AddHttpClient("commons-digest");
+        services.AddHttpClient("commons-relay");
         services.AddSingleton(sp => new RelayHttpClient(sp.GetRequiredService<IHttpClientFactory>().CreateClient("commons-relay"), sp.GetRequiredService<Func<(Uri BaseUri, string? Credential)>>()));
         services.AddSingleton<IEnvoyRelay>(sp => sp.GetRequiredService<RelayHttpClient>());
-        services.AddSingleton(sp => new NovaDigestSink(sp.GetRequiredService<IHttpClientFactory>().CreateClient("commons-digest"), sp.GetRequiredKeyedService<IExecutionTokens>(PluginId), sp.GetRequiredService<CommonsStateStore>(), sp.GetRequiredService<DigestFormatter>(), sp.GetRequiredService<ICommonsAudit>()));
-        services.AddSingleton<IDigestSink>(sp => sp.GetRequiredService<NovaDigestSink>());
+        services.AddSingleton<CommonsDigestSink>();
+        services.AddSingleton<IDigestSink>(sp => sp.GetRequiredService<CommonsDigestSink>());
+        services.AddSingleton(sp => new CommonsNovaContextExtension(
+            sp.GetRequiredKeyedService<IPluginExtensions>(PluginId),
+            sp.GetRequiredService<CommonsStateStore>()));
         services.AddSingleton<CommonsRuntime>();
         services.AddSingleton(sp => new ConnectorCore((request, ct) => sp.GetRequiredService<CommonsRuntime>().HandleAsync(request, ct)));
         services.AddSingleton<RelayConnector>();
     }
     public void MapEndpoints(RouteGroupBuilder group) => CommonsEndpoints.Map(group);
-    public Task OnStartupAsync(IPluginHost host, CancellationToken ct) => host.GetRequiredService<RelayConnector>().StartAsync(host.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
+    public Task OnStartupAsync(IPluginHost host, CancellationToken ct)
+    {
+        host.GetRequiredService<CommonsNovaContextExtension>().Start();
+        return host.GetRequiredService<RelayConnector>().StartAsync(
+            host.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
+    }
 }
