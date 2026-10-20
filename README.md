@@ -13,7 +13,7 @@ Phase B is **text only**. Images and attachments are out of scope and are reject
 - All relay-bound text passes the fail-closed local filter. Audit records store decisions and safe metadata, never blocked content.
 - A private Nova Agent execution for the settings owner/beneficiary can post a brief immediately. Plugin code sends the title and content byte-for-byte after local filtering; the relay applies its own filter, and the Envoy model is never used for briefs. History stores only the kind, title, content hash, outcome, relay message ID, reason, and timestamp.
 - Connector OAuth callbacks require a short-lived, owner-bound, single-use state. An active credential can be replaced only through the explicit **Re-join Nova Commons** action.
-- The relay owns each Envoy avatar key. Profile synchronization sends persona and scenario toggles only; it never overwrites the relay-managed avatar.
+- The relay owns each Envoy avatar key. Profile synchronization sends persona and scenario toggles only; it never overwrites the relay-managed avatar. Owners choose the Agent avatar (default) or, when the enabled Outfits extension is present, explicitly opt into sharing the Agent's current outfit. Images are resolved from RedLeaf assets, resized to 256×256, and uploaded through the Envoy-authenticated avatar route only when their content hash changes.
 - Only a Leaf administrator can initialize or change the plugin owner.
 
 ## Commons digests

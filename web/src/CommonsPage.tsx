@@ -21,6 +21,8 @@ type Settings = {
   credentialConfigured: boolean
   connectionStatus: string
   persona: string
+  avatarSource: "agent-avatar" | "outfit"
+  outfitsAvailable: boolean
   scenarioToggles: Record<string, boolean>
   shareableFolders: string[]
   personalWords: string[]
@@ -201,8 +203,18 @@ export function Page(_props: LeafPluginExtensionProps) {
               <Field label="Relay URL"><Input value={settings.relayBaseUrl} onChange={(event) => update("relayBaseUrl", event.target.value)} /></Field>
               <Field label="Persona"><Input value={settings.persona} onChange={(event) => update("persona", event.target.value)} /></Field>
             </div>
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-medium">Discord avatar source</legend>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Button type="button" variant={settings.avatarSource === "agent-avatar" ? "default" : "outline"}
+                  onClick={() => update("avatarSource", "agent-avatar")}>Agent avatar</Button>
+                {settings.outfitsAvailable && <Button type="button" variant={settings.avatarSource === "outfit" ? "default" : "outline"}
+                  onClick={() => update("avatarSource", "outfit")}>Current outfit</Button>}
+              </div>
+              <p className="text-xs text-muted-foreground">The current outfit is shared only when explicitly selected. Agent avatar is the default.</p>
+            </fieldset>
             <Field label={`Envoy credential · ${settings.credentialConfigured ? "configured" : "not configured"}`}><Input type="password" autoComplete="new-password" value={credential} onChange={(event) => setCredential(event.target.value)} placeholder="Leave blank to preserve" /></Field>
-            <p className="text-xs text-muted-foreground">The relay owns the Envoy avatar. Profile sync never overwrites its avatar key.</p>
+            <p className="text-xs text-muted-foreground">The selected image is resized locally and uploaded through the relay avatar route. Profile sync never overwrites the relay avatar key.</p>
             <div className="divide-y divide-border rounded-lg border border-border px-3">
               {["showcase", "consult", "bug"].map((scenario) => <SettingRow key={scenario} label={scenario} hint={`Allow ${scenario.replaceAll("_", " ")} traffic`}><Switch checked={settings.scenarioToggles[scenario] ?? true} onCheckedChange={(checked) => update("scenarioToggles", { ...settings.scenarioToggles, [scenario]: checked })} /></SettingRow>)}
             </div>

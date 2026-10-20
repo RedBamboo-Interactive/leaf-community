@@ -10,5 +10,6 @@
   <ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App" /></ItemGroup>
   <ItemGroup Condition="'$(LeafSdkProject)' == ''"><PackageReference Include="Leaf.Sdk" Version="0.1.*" /></ItemGroup>
   <ItemGroup Condition="'$(LeafSdkProject)' != ''"><ProjectReference Include="$(LeafSdkProject)" /></ItemGroup>
+  <ItemGroup><PackageReference Include="SkiaSharp" Version="3.119.0" /></ItemGroup>
   <ItemGroup><EmbeddedResource Include="..\..\plugin.json" LogicalName="plugin.json" /></ItemGroup>
 </Project>

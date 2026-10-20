@@ -7,29 +7,46 @@ namespace Leaf.Plugins.LeafCommons;
 
 public sealed record SettingsUpdate(string RelayBaseUrl, string? Credential, string Persona,
     Dictionary<string, bool> ScenarioToggles, string[] ShareableFolders, string[] PersonalWords, string[] Canaries,
-    string? NovaDiscussionId, string[] LinkAllowlist, string? OwnerUserId, string AgentEntityId);
+    string? NovaDiscussionId, string[] LinkAllowlist, string? OwnerUserId, string AgentEntityId,
+    string AvatarSource = AvatarSources.AgentAvatar);
 
 public static class CommonsEndpoints
 {
     public static void Map(RouteGroupBuilder group)
     {
         group.AddEndpointFilter(async (context, next) => { context.HttpContext.Response.Headers.CacheControl = "private, no-store"; return await next(context); });
-        group.MapGet("/settings", async (IAuthContext auth, CommonsStateStore store, CancellationToken ct) =>
+        group.MapGet("/settings", async (IAuthContext auth, CommonsStateStore store, AvatarSyncService avatars, CancellationToken ct) =>
         {
-            var settings = await store.GetSettingsAsync(ct); return IsOwner(auth, settings) ? Results.Ok(settings.Public()) : Forbidden();
+            var settings = await store.GetSettingsAsync(ct);
+            return IsOwner(auth, settings)
+                ? Results.Ok(settings.Public(await avatars.IsOutfitsAvailableAsync(ct)))
+                : Forbidden();
         });
-        group.MapPut("/settings", async (SettingsUpdate update, IAuthContext auth, CommonsStateStore store, RelayHttpClient relayClient, CancellationToken ct) =>
+        group.MapPut("/settings", async (SettingsUpdate update, IAuthContext auth, CommonsStateStore store,
+            RelayHttpClient relayClient, AvatarSyncService avatars, IAvatarImageSource avatarImages, CancellationToken ct) =>
         {
             if (!Uri.TryCreate(update.RelayBaseUrl, UriKind.Absolute, out var relay) || relay.Scheme is not ("http" or "https")) return Results.BadRequest(new { error = "invalid_relay_url" });
             var current = await store.GetSettingsAsync(ct);
             if (!CanWriteSettings(auth, current, update.OwnerUserId)) return Forbidden();
+            if (await AvatarSources.ValidateAsync(update.AvatarSource, avatarImages, ct) is { } avatarError)
+                return Results.BadRequest(new { error = avatarError });
             var credential = string.IsNullOrWhiteSpace(update.Credential) ? current.Credential : update.Credential;
+            var avatarChanged = current.AvatarSource != update.AvatarSource
+                || !string.Equals(current.AgentEntityId, update.AgentEntityId, StringComparison.OrdinalIgnoreCase);
             var saved = await store.SaveSettingsAsync(new(current.EntityId, relay.ToString(), credential, current.ConnectionStatus,
                 update.Persona, current.Avatar, update.ScenarioToggles, update.ShareableFolders, update.PersonalWords,
-                update.Canaries, update.NovaDiscussionId, update.LinkAllowlist, ResolveOwnerUserId(auth, current, update.OwnerUserId), update.AgentEntityId), ct);
+                update.Canaries, update.NovaDiscussionId, update.LinkAllowlist, ResolveOwnerUserId(auth, current, update.OwnerUserId), update.AgentEntityId,
+                update.AvatarSource, avatarChanged ? null : current.AvatarContentHash), ct);
             if (!string.IsNullOrWhiteSpace(saved.Credential))
+            {
                 await relayClient.UpdateProfileAsync(saved.Persona, saved.ScenarioToggles, ct);
-            return Results.Ok(saved.Public());
+                try { await avatars.SyncAsync(saved, ct); }
+                catch (AvatarSyncException error)
+                {
+                    return Results.Json(new { error = "avatar_sync_failed", reason = error.Reason }, statusCode: 422);
+                }
+            }
+            return Results.Ok(saved.Public(await avatars.IsOutfitsAvailableAsync(ct)));
         });
         group.MapGet("/oauth/start", async (string callback, string? scenarios, bool? rejoin, IAuthContext auth, RelayHttpClient relay, CommonsStateStore store, CancellationToken ct) =>
         {
@@ -40,7 +57,8 @@ public static class CommonsEndpoints
             var callbackWithState = AddQuery(callback, "state", oauth.State);
             return Results.Ok(new { authorizeUrl = relay.BuildAuthorizeUri(callbackWithState, (scenarios ?? "showcase,consult,open_question,bug").Split(',', StringSplitOptions.RemoveEmptyEntries)) });
         });
-        group.MapGet("/oauth/callback", async (string exchangeCode, string? state, IAuthContext auth, RelayHttpClient relay, CommonsStateStore store, CancellationToken ct) =>
+        group.MapGet("/oauth/callback", async (string exchangeCode, string? state, IAuthContext auth, RelayHttpClient relay,
+            CommonsStateStore store, AvatarSyncService avatars, CancellationToken ct) =>
         {
             var before = await store.GetSettingsAsync(ct);
             if (!IsConfiguredOwner(auth, before) || string.IsNullOrWhiteSpace(auth.UserId)) return Forbidden();
@@ -48,7 +66,8 @@ public static class CommonsEndpoints
             if (consumed.Status != OAuthStateStatus.Accepted) return OAuthStateFailure(consumed.Status);
             if (!CanCompleteOAuthCallback(before, consumed)) return Results.Conflict(new { error = "active_credential_requires_rejoin" });
             var exchange = await relay.ExchangeAsync(exchangeCode, ct);
-            await store.SaveSettingsAsync(before with { Credential = exchange.Credential, ConnectionStatus = exchange.Status == "pending" ? "pending approval" : exchange.Status, Persona = exchange.PersonaName, Avatar = exchange.AvatarObjectKey }, ct);
+            var saved = await store.SaveSettingsAsync(before with { Credential = exchange.Credential, ConnectionStatus = exchange.Status == "pending" ? "pending approval" : exchange.Status, Persona = exchange.PersonaName, Avatar = exchange.AvatarObjectKey, AvatarContentHash = null }, ct);
+            try { await avatars.SyncAsync(saved, ct); } catch (AvatarSyncException) { }
             return Results.Redirect("/apps/leaf-commons?joined=pending");
         });
         group.MapPost("/briefs", async (BriefSubmission request, HttpContext http,

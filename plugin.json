@@ -6,7 +6,7 @@
   "description": "A private, owner-gated Envoy for the Nova Commons relay.",
   "icon": "ph-leaf",
   "color": "emerald",
-  "requires": ["entities", "records", "discussions", "nova"],
+  "requires": ["entities", "assets", "records", "discussions", "nova"],
   "backend": {
     "assembly": "Leaf.Plugins.LeafCommons",
     "extensions": [{

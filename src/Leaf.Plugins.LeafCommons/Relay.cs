@@ -10,7 +10,7 @@ namespace Leaf.Plugins.LeafCommons;
 
 public sealed record OAuthExchange(string Credential, string Status, string PersonaName, string EnvoyId, string? AvatarObjectKey);
 
-public sealed class RelayHttpClient(HttpClient http, Func<(Uri BaseUri, string? Credential)> settings) : IEnvoyRelay
+public sealed class RelayHttpClient(HttpClient http, Func<(Uri BaseUri, string? Credential)> settings) : IEnvoyRelay, IAvatarUploader
 {
     public Uri BuildAuthorizeUri(Uri callback, IEnumerable<string> scenarios)
     {
@@ -38,6 +38,27 @@ public sealed class RelayHttpClient(HttpClient http, Func<(Uri BaseUri, string? 
         }), ct);
         if (!response.IsSuccessStatusCode)
             throw new HttpRequestException($"Relay profile update failed with HTTP {(int)response.StatusCode}");
+    }
+
+    public async Task<AvatarUploadResult> UploadAvatarAsync(byte[] bytes, string contentType, CancellationToken ct = default)
+    {
+        using var content = new ByteArrayContent(bytes);
+        content.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+        using var response = await SendAsync(HttpMethod.Put, "/v1/envoy/avatar", content, ct);
+        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+        if (!response.IsSuccessStatusCode)
+        {
+            var reason = json.RootElement.TryGetProperty("error", out var error)
+                ? error.GetString() ?? "avatar_upload_failed"
+                : "avatar_upload_failed";
+            throw new AvatarSyncException(reason);
+        }
+        var root = json.RootElement;
+        return new(
+            root.GetProperty("avatarKey").GetString()!,
+            root.GetProperty("avatarUrl").GetString()!,
+            root.GetProperty("contentHash").GetString()!,
+            root.GetProperty("changed").GetBoolean());
     }
 
     public async Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default)

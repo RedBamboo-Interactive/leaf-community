@@ -26,6 +26,18 @@ public sealed class LeafCommonsPlugin : ILeafPlugin
         services.AddHttpClient("commons-relay");
         services.AddSingleton(sp => new RelayHttpClient(sp.GetRequiredService<IHttpClientFactory>().CreateClient("commons-relay"), sp.GetRequiredService<Func<(Uri BaseUri, string? Credential)>>()));
         services.AddSingleton<IEnvoyRelay>(sp => sp.GetRequiredService<RelayHttpClient>());
+        services.AddSingleton<IAvatarUploader>(sp => sp.GetRequiredService<RelayHttpClient>());
+        services.AddSingleton<IAvatarImageSource>(sp => new RedLeafAvatarImageSource(
+            sp.GetRequiredKeyedService<IEntityStore>(PluginId),
+            sp.GetRequiredService<IAssets>()));
+        services.AddSingleton<AvatarImageProcessor>();
+        services.AddSingleton(sp => new AvatarSyncService(
+            sp.GetRequiredService<CommonsStateStore>(),
+            sp.GetRequiredService<IAvatarImageSource>(),
+            sp.GetRequiredService<AvatarImageProcessor>(),
+            sp.GetRequiredService<IAvatarUploader>(),
+            sp.GetRequiredKeyedService<IPluginEvents>(PluginId),
+            sp.GetRequiredService<ICommonsAudit>()));
         services.AddSingleton<CommonsDigestSink>();
         services.AddSingleton<IDigestSink>(sp => sp.GetRequiredService<CommonsDigestSink>());
         services.AddSingleton(sp => new CommonsNovaContextExtension(
@@ -36,10 +48,11 @@ public sealed class LeafCommonsPlugin : ILeafPlugin
         services.AddSingleton<RelayConnector>();
     }
     public void MapEndpoints(RouteGroupBuilder group) => CommonsEndpoints.Map(group);
-    public Task OnStartupAsync(IPluginHost host, CancellationToken ct)
+    public async Task OnStartupAsync(IPluginHost host, CancellationToken ct)
     {
         host.GetRequiredService<CommonsNovaContextExtension>().Start();
-        return host.GetRequiredService<RelayConnector>().StartAsync(
-            host.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
+        var stopping = host.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;
+        await host.GetRequiredService<AvatarSyncService>().StartAsync(stopping);
+        await host.GetRequiredService<RelayConnector>().StartAsync(stopping);
     }
 }
