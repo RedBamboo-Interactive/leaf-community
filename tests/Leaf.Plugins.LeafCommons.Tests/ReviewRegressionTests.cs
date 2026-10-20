@@ -14,7 +14,7 @@ public sealed class ReviewRegressionTests : IDisposable
     public void Dispose() { if (Directory.Exists(root)) Directory.Delete(root, true); }
 
     [Fact]
-    public async Task Approved_brief_posts_approved_title_and_content_byte_for_byte_without_model_call()
+    public async Task Verified_private_nova_brief_posts_immediately_without_a_decision_call()
     {
         var entities = new MemoryEntityStore();
         var state = new CommonsStateStore(entities);
@@ -22,27 +22,31 @@ public sealed class ReviewRegressionTests : IDisposable
             new Dictionary<string, bool> { ["consult"] = true }, [], [], [], null, [], "owner-1", "agent-1"));
         var title = "  Retry strategy — exact title  ";
         var content = "First line\r\nSecond line with  double spaces.\n";
-        var id = Guid.NewGuid();
-        var brief = new LeafEntity(id, "leaf-commons-brief", "brief-1", "consult preview", new JsonObject
-        {
-            ["kind"] = "consult", ["title"] = title, ["content"] = content,
-            ["addresses"] = new JsonArray("envoy-b"), ["state"] = "approved",
-            ["owner_id"] = "owner-1", ["agent_id"] = "agent-1"
-        }, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, "owner-1");
-        var model = new CountingModel("{\"action\":\"post\",\"content\":\"MODEL REPLACED THE PREVIEW\"}");
+        var model = new CountingModel("{\"action\":\"post\",\"content\":\"MODEL REPLACED THE BRIEF\"}");
         var relay = new FakeRelay();
         var runtime = new CommonsRuntime(model, new ShareableStore(root), relay, new OutboundFilter(new SecretScanner()), state, new NullDigestSink());
 
-        var result = await runtime.DispatchApprovedBriefAsync(brief);
+        var result = await runtime.PostBriefAsync(
+            new("consult", content, title, ["envoy-b"]), new("agent-1", "owner-1"));
 
-        Assert.Equal("posted", result.State);
-        Assert.Equal(0, result.Steps);
+        Assert.Equal("posted", result.Decision);
+        Assert.Equal("m1", result.MessageId);
+        Assert.Null(result.Reason);
         Assert.Equal(0, model.Calls);
         var opened = Assert.Single(relay.Opened);
         Assert.Equal("consult", opened.Scenario);
         Assert.Equal(title, opened.Title);
         Assert.Equal(content, opened.Content);
         Assert.Equal(["envoy-b"], opened.Addresses);
+        var history = Assert.Single(await state.ListBriefsAsync());
+        Assert.Equal("consult", history.Kind);
+        Assert.Equal(title, history.Title);
+        Assert.Equal(CommonsStateStore.ContentHash(content), history.ContentHash);
+        Assert.Equal("posted", history.Outcome);
+        Assert.Equal("m1", history.MessageId);
+        var stored = Assert.Single(await entities.QueryAsync(new EntityQuery { TypeSlug = "leaf-commons-brief" }));
+        Assert.Null(stored.Data["content"]);
+        Assert.Null(stored.Data["addresses"]);
     }
 
     [Fact]
@@ -91,30 +95,55 @@ public sealed class ReviewRegressionTests : IDisposable
     }
 
     [Fact]
-    public async Task Approved_brief_is_still_blocked_locally_before_relay_delivery()
+    public async Task Canary_in_brief_is_blocked_immediately_and_recorded_without_relay_delivery()
     {
         var entities = new MemoryEntityStore();
         var state = new CommonsStateStore(entities);
         await state.SaveSettingsAsync(new(null, "https://relay.example", "credential", "active", "Nova", null,
-            new Dictionary<string, bool> { ["consult"] = true }, [], [], ["CANARY-APPROVAL"], null, [], "owner-1", "agent-1"));
-        var brief = new LeafEntity(Guid.NewGuid(), "leaf-commons-brief", "brief-blocked", "consult preview", new JsonObject
-        {
-            ["kind"] = "consult", ["title"] = "Safe title", ["content"] = "CANARY-APPROVAL",
-            ["addresses"] = new JsonArray("envoy-b"), ["state"] = "approved"
-        }, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, "owner-1");
+            new Dictionary<string, bool> { ["consult"] = true }, [], [], ["CANARY-BRIEF"], null, [], "owner-1", "agent-1"));
         var model = new CountingModel("{\"action\":\"post\",\"content\":\"irrelevant\"}");
         var relay = new FakeRelay();
         var runtime = new CommonsRuntime(model, new ShareableStore(root), relay, new OutboundFilter(new SecretScanner()), state, new NullDigestSink());
 
-        var result = await runtime.DispatchApprovedBriefAsync(brief);
+        var result = await runtime.PostBriefAsync(
+            new("consult", "CANARY-BRIEF", "Safe title", ["envoy-b"]),
+            new("agent-1", "owner-1"));
 
-        Assert.Equal("blocked", result.State);
-        Assert.Equal("canary", result.Summary);
+        Assert.Equal("blocked", result.Decision);
+        Assert.Equal("canary", result.Reason);
+        Assert.Null(result.MessageId);
         Assert.Equal(0, model.Calls);
         Assert.Empty(relay.Opened);
+        var history = Assert.Single(await state.ListBriefsAsync());
+        Assert.Equal("blocked", history.Outcome);
+        Assert.Equal("canary", history.Reason);
+        Assert.Equal(CommonsStateStore.ContentHash("CANARY-BRIEF"), history.ContentHash);
         var audits = await entities.QueryAsync(new EntityQuery { TypeSlug = "leaf-commons-audit" });
         Assert.Contains(audits, x => x.Data["event"]?.GetValue<string>() == "filter_decision"
             && x.Data["metadata"]?["alarm"]?.GetValue<bool>() == true);
+    }
+
+    [Fact]
+    public async Task Relay_rejected_brief_returns_reason_and_is_recorded_without_retry()
+    {
+        var state = new CommonsStateStore(new MemoryEntityStore());
+        await state.SaveSettingsAsync(new(null, "https://relay.example", "credential", "active", "Nova", null,
+            new Dictionary<string, bool> { ["consult"] = true }, [], [], [], null, [], "owner-1", "agent-1"));
+        var relay = new RejectingBriefRelay("relay_link_not_allowed");
+        var runtime = new CommonsRuntime(new CountingModel("unused"), new ShareableStore(root), relay,
+            new OutboundFilter(new SecretScanner()), state, new NullDigestSink());
+
+        var result = await runtime.PostBriefAsync(
+            new("consult", "See https://github.com/example/repo", "Reference", []),
+            new("agent-1", "owner-1"));
+
+        Assert.Equal("rejected", result.Decision);
+        Assert.Equal("relay_link_not_allowed", result.Reason);
+        Assert.Null(result.MessageId);
+        Assert.Equal(1, relay.Calls);
+        var history = Assert.Single(await state.ListBriefsAsync());
+        Assert.Equal("rejected", history.Outcome);
+        Assert.Equal("relay_link_not_allowed", history.Reason);
     }
 
     [Fact]
@@ -212,6 +241,23 @@ internal sealed class CapturingDigestSink : IDigestSink
     {
         Items.Add(digest);
         return Task.CompletedTask;
+    }
+}
+
+internal sealed class RejectingBriefRelay(string reason) : IEnvoyRelay
+{
+    public int Calls { get; private set; }
+    public Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default) =>
+        Task.FromResult<IReadOnlyList<RelayMessage>>([]);
+    public Task<RelayPostResult> PostAsync(string threadRef, string content,
+        IReadOnlyList<string>? addresses = null, string? idempotencyKey = null,
+        CancellationToken ct = default) => throw new NotSupportedException();
+    public Task<RelayPostResult> OpenAsync(string scenario, string? threadName, string content,
+        IReadOnlyList<string>? addresses = null, string? idempotencyKey = null,
+        CancellationToken ct = default)
+    {
+        Calls++;
+        return Task.FromResult(new RelayPostResult(false, reason));
     }
 }
 

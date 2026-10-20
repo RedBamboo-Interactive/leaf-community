@@ -29,6 +29,10 @@ public sealed record StoredDigest(
     Guid Id, string Type, string Content, string ThreadRef, bool Read,
     DateTimeOffset CreatedAt);
 
+public sealed record StoredBrief(
+    Guid Id, string Kind, string? Title, string ContentHash, string Outcome,
+    string? MessageId, string? Reason, DateTimeOffset CreatedAt);
+
 public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
 {
     private static readonly TimeSpan OAuthStateLifetime = TimeSpan.FromMinutes(10);
@@ -49,24 +53,35 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         return FromEntity(saved);
     }
 
-    public async Task<LeafEntity> EnqueueBriefAsync(string kind, string content, string? title, IReadOnlyList<string>? addresses, LeafAgentCaller caller, CancellationToken ct = default)
+    public async Task<StoredBrief> RecordBriefAsync(
+        string kind, string? title, string content, string outcome,
+        string? messageId, string? reason, CancellationToken ct = default)
     {
-        if (!new[] { "showcase", "consult", "open_question", "bug", "bug_report", "intro_draft" }.Contains(kind)) throw new ArgumentException("Unsupported brief kind");
-        if (string.IsNullOrWhiteSpace(content) || content.Length > 12_000) throw new ArgumentException("Brief content must be 1-12000 characters");
-        ValidateTitle(kind, title);
-        if (addresses is { Count: > 10 } || addresses?.Any(string.IsNullOrWhiteSpace) == true) throw new ArgumentException("Addresses must contain at most 10 non-empty values");
-        var brief = await entities.CreateAsync("leaf-commons-brief", $"{kind} preview", new JsonObject
+        if (outcome is not ("posted" or "blocked" or "rejected"))
+            throw new ArgumentException("Brief outcome must be posted, blocked, or rejected", nameof(outcome));
+        var createdAt = DateTimeOffset.UtcNow;
+        var brief = await entities.CreateAsync("leaf-commons-brief", $"{kind} {outcome}", new JsonObject
         {
-            ["kind"] = kind, ["title"] = title, ["content"] = content,
-            ["addresses"] = JsonSerializer.SerializeToNode(addresses ?? []), ["state"] = "preview",
-            ["owner_id"] = caller.BeneficiaryId, ["agent_id"] = caller.AgentEntityId
+            ["kind"] = kind,
+            ["title"] = title,
+            ["content_hash"] = ContentHash(content),
+            ["outcome"] = outcome,
+            ["message_id"] = messageId,
+            ["reason"] = reason,
+            ["created_at"] = createdAt.ToString("O")
         }, ct);
-        await RecordAsync("brief_enqueued", new Dictionary<string, object?> { ["briefId"] = brief.Id, ["kind"] = kind }, ct);
-        return brief;
+        return ToBrief(brief);
     }
 
-    public Task<IReadOnlyList<LeafEntity>> ListBriefsAsync(CancellationToken ct = default) =>
-        entities.QueryAsync(new EntityQuery { TypeSlug = "leaf-commons-brief", OrderById = true, Limit = 200 }, ct);
+    public async Task<IReadOnlyList<StoredBrief>> ListBriefsAsync(CancellationToken ct = default)
+    {
+        var found = await entities.QueryAsync(new EntityQuery
+            { TypeSlug = "leaf-commons-brief", Limit = 500 }, ct);
+        return found.Select(ToBrief)
+            .OrderByDescending(x => x.CreatedAt)
+            .ThenByDescending(x => x.Id)
+            .ToArray();
+    }
 
     public async Task<StoredDigest> StoreDigestAsync(
         string type, string content, string threadRef, CancellationToken ct = default)
@@ -108,28 +123,6 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         if (entity.Data["read"]?.GetValue<bool>() != true)
             entity = await entities.PatchAsync(id, new JsonObject { ["read"] = true }, ct: ct);
         return ToDigest(entity);
-    }
-
-    public async Task<LeafEntity> DecideBriefAsync(Guid id, string decision, string? editedContent, string? editedTitle, IReadOnlyList<string>? editedAddresses, string ownerId, CancellationToken ct = default)
-    {
-        var brief = await entities.GetAsync(id) ?? throw new KeyNotFoundException("Brief not found");
-        if (brief.TypeSlug != "leaf-commons-brief" || brief.Data["state"]?.GetValue<string>() != "preview") throw new InvalidOperationException("Brief is not pending preview");
-        if (!string.Equals(brief.Data["owner_id"]?.GetValue<string>(), ownerId, StringComparison.Ordinal)) throw new UnauthorizedAccessException("Only the owner may decide this brief");
-        if (decision is not ("approved" or "rejected")) throw new ArgumentException("Decision must be approved or rejected");
-        if (editedContent is { Length: > 12000 }) throw new ArgumentException("Edited content too large");
-        var finalContent = editedContent ?? brief.Data["content"]?.GetValue<string>() ?? "";
-        if (string.IsNullOrWhiteSpace(finalContent)) throw new ArgumentException("Edited content must not be empty");
-        var finalTitle = editedTitle ?? S(brief.Data, "title");
-        ValidateTitle(S(brief.Data, "kind")!, finalTitle);
-        var finalAddresses = editedAddresses ?? List(brief.Data["addresses"]);
-        if (finalAddresses.Count > 10 || finalAddresses.Any(string.IsNullOrWhiteSpace)) throw new ArgumentException("Addresses must contain at most 10 non-empty values");
-        var patch = new JsonObject { ["state"] = decision };
-        if (editedContent is not null) patch["content"] = editedContent;
-        if (editedTitle is not null) patch["title"] = editedTitle;
-        if (editedAddresses is not null) patch["addresses"] = JsonSerializer.SerializeToNode(editedAddresses);
-        var updated = await entities.PatchAsync(id, patch, ct: ct);
-        await RecordAsync("brief_decision", new Dictionary<string, object?> { ["briefId"] = id, ["decision"] = decision }, ct);
-        return updated;
     }
 
     public async Task<OAuthStateIssue> CreateOAuthStateAsync(string ownerId, bool allowActiveOverwrite, DateTimeOffset? now = null, CancellationToken ct = default)
@@ -199,14 +192,24 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
             S(entity.Data, "content") ?? "", S(entity.Data, "thread_ref") ?? "unknown",
             entity.Data["read"]?.GetValue<bool>() == true, createdAt);
     }
-    private static void ValidateTitle(string kind, string? title)
+
+    private static StoredBrief ToBrief(LeafEntity entity)
     {
-        if (kind is "consult" or "open_question" or "bug" or "bug_report")
-        {
-            if (string.IsNullOrWhiteSpace(title) || title.Length > 100) throw new ArgumentException("Thread-opening briefs require a 1-100 character title");
-        }
-        else if (title is { Length: > 100 }) throw new ArgumentException("Brief title must be at most 100 characters");
+        var createdAt = DateTimeOffset.TryParse(S(entity.Data, "created_at"), out var parsed)
+            ? parsed
+            : entity.CreatedAt;
+        var legacyContent = S(entity.Data, "content");
+        var storedOutcome = S(entity.Data, "outcome");
+        var outcome = storedOutcome ?? "legacy";
+        var reason = S(entity.Data, "reason")
+            ?? (storedOutcome is null ? "pre-immediate-dispatch-history" : null);
+        return new(entity.Id, S(entity.Data, "kind") ?? "unknown", S(entity.Data, "title"),
+            S(entity.Data, "content_hash") ?? ContentHash(legacyContent ?? ""), outcome,
+            S(entity.Data, "message_id"), reason, createdAt);
     }
+
+    public static string ContentHash(string content) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
     private static string OAuthStateSlug(string token)
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(token));

@@ -48,16 +48,15 @@ try{
   aCore=new ConnectorCore("A",async frame=>{if(frame.type!=="ping"||aDigested)return;aDigested=true;const scripted={action:"done",summary:"B recommends exponential backoff capped at 30 seconds."};assert.equal(scripted.action,"done");digests.push({type:"consult_answer",content:`> External Commons quote — consult answer\n> ${scripted.summary}`,threadRef:frame.threadRef})})
   bCore=new ConnectorCore("B",async frame=>{if(frame.type!=="ping"||bAnswered)return;bAnswered=true;const searchAction={action:"search_shareable",query:"backoff"};assert.equal(searchAction.action,"search_shareable");const hits=[...bShareable].filter(([,v])=>v.toLowerCase().includes(searchAction.query)).map(([p])=>p);assert.deepEqual(hits,["project/retry.md"]);const read=bShareable.get(hits[0]);const action={action:"post",content:`From my curated shareable set: ${read}`,addresses:[a.envoy.id]};await post(b.credential,{scenario:"consult_reply",threadRef:frame.threadRef,content:action.content,addresses:action.addresses,idempotencyKey:"b-answer"})})
   await Promise.all([aCore.connect(a.credential),bCore.connect(b.credential)])
-  const brief={kind:"consult",title:"  Retry strategy consult  ",content:"What retry strategy does your shareable engineering set recommend?\nKeep this line exactly.",addresses:[b.envoy.id],state:"preview"};assert.equal(webhookCount,0,"preview must not dispatch");brief.state="approved"
-  const scriptedModelWouldReplacePreview={action:"post",content:"MODEL CHANGED THE APPROVED BRIEF",addresses:[]};assert.notEqual(scriptedModelWouldReplacePreview.content,brief.content)
+  const brief={kind:"consult",title:"  Retry strategy consult  ",content:"What retry strategy does your shareable engineering set recommend?\nKeep this line exactly.",addresses:[b.envoy.id]}
   const opened=await post(a.credential,{scenario:"consult",threadName:brief.title,content:brief.content,addresses:brief.addresses,idempotencyKey:"a-brief"});assert.equal(opened.decision,"posted");threadRef=opened.threadId
-  assert.equal(webhookBodies[0].thread_name,brief.title,"approved title must be byte-exact")
-  assert.equal(webhookBodies[0].content,brief.content,"approved content must be byte-exact")
+  assert.equal(webhookBodies[0].thread_name,brief.title,"brief title must be byte-exact")
+  assert.equal(webhookBodies[0].content,brief.content,"brief content must be byte-exact")
   await waitFor(()=>bCore.frames.some(f=>f.type==="ping"&&f.threadRef===threadRef),"B ping")
   await waitFor(()=>digests.length===1,"A digest");assert.equal(digests[0].type,"consult_answer");assert.match(digests[0].content,/External Commons quote/);assert.doesNotMatch(digests[0].content,/raw Discord/i)
   assert.equal((await post(a.credential,{scenario:"consult_reply",threadRef,content:"Exchange three",addresses:[b.envoy.id],idempotencyKey:"ex-3"})).decision,"posted")
   assert.equal((await post(b.credential,{scenario:"consult_reply",threadRef,content:"Exchange four",addresses:[a.envoy.id],idempotencyKey:"ex-4"})).decision,"posted")
   const fifth=await post(a.credential,{scenario:"consult_reply",threadRef,content:"Exchange five",addresses:[b.envoy.id],idempotencyKey:"ex-5"});assert.equal(fifth.reason,"wait_for_human")
   assert.equal(webhookCount,4)
-  console.log("ok 1 - two connector cores complete approved consult, shareable answer, digest, and wait_for_human cap")
+  console.log("ok 1 - two connector cores complete immediate consult, shareable answer, digest, and wait_for_human cap")
 }finally{aCore?.close();bCore?.close();await stop(child);discord.close();await once(discord,"close");if(!persist.toLowerCase().startsWith(join(tmpdir(),"leaf-commons-e2e-").toLowerCase()))throw new Error(`Refusing cleanup ${persist}`);await rm(persist,{recursive:true,force:true,maxRetries:20,retryDelay:100})}

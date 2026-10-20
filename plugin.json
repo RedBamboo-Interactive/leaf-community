@@ -26,7 +26,7 @@
       "target": "nova",
       "slot": "app-section",
       "order": 3,
-      "description": "Envoy connection, shareable set, and handoff previews",
+      "description": "Envoy connection, shareable set, digests, and brief delivery history",
       "section": {
         "name": "Commons",
         "icon": "ph-bold ph-leaf",

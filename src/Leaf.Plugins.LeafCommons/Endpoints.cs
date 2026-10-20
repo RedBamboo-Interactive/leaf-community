@@ -5,8 +5,6 @@ using Leaf.Sdk.Services;
 
 namespace Leaf.Plugins.LeafCommons;
 
-public sealed record BriefRequest(string Kind, string Content, string? Title = null, string[]? Addresses = null);
-public sealed record BriefDecisionRequest(string Decision, string? Content, string? Title = null, string[]? Addresses = null);
 public sealed record SettingsUpdate(string RelayBaseUrl, string? Credential, string Persona, string? Avatar,
     Dictionary<string, bool> ScenarioToggles, string[] ShareableFolders, string[] PersonalWords, string[] Canaries,
     string? NovaDiscussionId, string[] LinkAllowlist, string? OwnerUserId, string AgentEntityId);
@@ -53,16 +51,25 @@ public static class CommonsEndpoints
             await store.SaveSettingsAsync(before with { Credential = exchange.Credential, ConnectionStatus = exchange.Status == "pending" ? "pending approval" : exchange.Status, Persona = exchange.PersonaName, Avatar = exchange.AvatarObjectKey }, ct);
             return Results.Redirect("/apps/leaf-commons?joined=pending");
         });
-        group.MapPost("/briefs", async (BriefRequest request, HttpContext http, CommonsStateStore store, CancellationToken ct) =>
+        group.MapPost("/briefs", async (BriefSubmission request, HttpContext http,
+            CommonsStateStore store, CommonsRuntime runtime, CancellationToken ct) =>
         {
             var settings = await store.GetSettingsAsync(ct); var caller = OwnerGuard.ReadPrivateNovaAgent(http.User, settings);
             if (caller is null) return Results.Json(new { error = "owner_agent_required" }, statusCode: 403);
-            var brief = await store.EnqueueBriefAsync(request.Kind, request.Content, request.Title, request.Addresses, caller, ct);
-            return Results.Accepted(value: new { id = brief.Id, state = "preview" });
+            try
+            {
+                var result = await runtime.PostBriefAsync(request, caller, ct);
+                return Results.Ok(new
+                    { decision = result.Decision, messageId = result.MessageId, reason = result.Reason });
+            }
+            catch (ArgumentException ex) { return Results.BadRequest(new { error = "invalid_brief", message = ex.Message }); }
         });
         group.MapGet("/briefs", async (IAuthContext auth, CommonsStateStore store, CancellationToken ct) =>
         {
-            var settings = await store.GetSettingsAsync(ct); return IsOwner(auth, settings) ? Results.Ok(new { items = (await store.ListBriefsAsync(ct)).Select(x => new { id = x.Id, kind = x.Data["kind"], title = x.Data["title"], content = x.Data["content"], addresses = x.Data["addresses"], state = x.Data["state"] }) }) : Forbidden();
+            var settings = await store.GetSettingsAsync(ct);
+            return IsOwner(auth, settings)
+                ? Results.Ok(new { items = await store.ListBriefsAsync(ct) })
+                : Forbidden();
         });
         group.MapGet("/digests", async (IAuthContext auth, CommonsStateStore store, CancellationToken ct) =>
         {
@@ -77,14 +84,8 @@ public static class CommonsEndpoints
             try { return Results.Ok(await store.MarkDigestReadAsync(id, ct)); }
             catch (KeyNotFoundException) { return Results.NotFound(new { error = "digest_not_found" }); }
         });
-        group.MapPost("/briefs/{id:guid}/decision", async (Guid id, BriefDecisionRequest request, IAuthContext auth, CommonsStateStore store, CommonsRuntime runtime, CancellationToken ct) =>
-        {
-            var settings = await store.GetSettingsAsync(ct); if (!IsOwner(auth, settings) || string.IsNullOrWhiteSpace(auth.UserId)) return Forbidden();
-            var brief = await store.DecideBriefAsync(id, request.Decision, request.Content, request.Title, request.Addresses, auth.UserId, ct);
-            EnvoyRunResult? result = null;
-            if (request.Decision == "approved") result = await runtime.DispatchApprovedBriefAsync(brief, ct);
-            return Results.Ok(new { id = brief.Id, state = brief.Data["state"], result });
-        });
+        group.MapPost("/briefs/{id:guid}/decision", (Guid id) =>
+            Results.Json(new { error = "brief_decision_removed" }, statusCode: StatusCodes.Status410Gone));
         group.MapPost("/shareable/rebuild", async (IAuthContext auth, CommonsStateStore store, ShareableSetBuilder builder, ShareableStore shareable, CancellationToken ct) =>
         {
             var settings = await store.GetSettingsAsync(ct); if (!IsOwner(auth, settings)) return Forbidden();

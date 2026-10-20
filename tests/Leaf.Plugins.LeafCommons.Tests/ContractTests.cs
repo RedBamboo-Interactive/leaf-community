@@ -76,6 +76,7 @@ public sealed class ContractTests
         Assert.NotNull(OwnerGuard.ReadPrivateNovaAgent(principal, settings));
         Assert.Null(OwnerGuard.ReadPrivateNovaAgent(Principal(identity.Replace("owner-1", "intruder")), settings));
         Assert.Null(OwnerGuard.ReadPrivateNovaAgent(Principal(identity.Replace("discussion", "external-conversation")), settings));
+        Assert.Null(OwnerGuard.ReadPrivateNovaAgent(Principal(identity.Replace("]}", ",{\"kind\":\"external-conversation\",\"id\":\"external-1\"}]}")), settings));
         Assert.Null(OwnerGuard.ReadPrivateNovaAgent(new ClaimsPrincipal(new ClaimsIdentity()), settings));
     }
 
