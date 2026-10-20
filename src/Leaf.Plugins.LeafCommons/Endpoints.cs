@@ -5,7 +5,7 @@ using Leaf.Sdk.Services;
 
 namespace Leaf.Plugins.LeafCommons;
 
-public sealed record SettingsUpdate(string RelayBaseUrl, string? Credential, string Persona, string? Avatar,
+public sealed record SettingsUpdate(string RelayBaseUrl, string? Credential, string Persona,
     Dictionary<string, bool> ScenarioToggles, string[] ShareableFolders, string[] PersonalWords, string[] Canaries,
     string? NovaDiscussionId, string[] LinkAllowlist, string? OwnerUserId, string AgentEntityId);
 
@@ -25,10 +25,10 @@ public static class CommonsEndpoints
             if (!CanWriteSettings(auth, current, update.OwnerUserId)) return Forbidden();
             var credential = string.IsNullOrWhiteSpace(update.Credential) ? current.Credential : update.Credential;
             var saved = await store.SaveSettingsAsync(new(current.EntityId, relay.ToString(), credential, current.ConnectionStatus,
-                update.Persona, update.Avatar, update.ScenarioToggles, update.ShareableFolders, update.PersonalWords,
+                update.Persona, current.Avatar, update.ScenarioToggles, update.ShareableFolders, update.PersonalWords,
                 update.Canaries, update.NovaDiscussionId, update.LinkAllowlist, ResolveOwnerUserId(auth, current, update.OwnerUserId), update.AgentEntityId), ct);
             if (!string.IsNullOrWhiteSpace(saved.Credential))
-                await relayClient.UpdateProfileAsync(saved.Persona, saved.Avatar, saved.ScenarioToggles, ct);
+                await relayClient.UpdateProfileAsync(saved.Persona, saved.ScenarioToggles, ct);
             return Results.Ok(saved.Public());
         });
         group.MapGet("/oauth/start", async (string callback, string? scenarios, bool? rejoin, IAuthContext auth, RelayHttpClient relay, CommonsStateStore store, CancellationToken ct) =>

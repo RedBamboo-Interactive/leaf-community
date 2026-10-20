@@ -111,13 +111,14 @@ public sealed class ContractTests
     }
 
     [Fact]
-    public async Task Relay_profile_request_contains_only_public_fields()
+    public async Task Relay_profile_sync_never_overwrites_the_relay_owned_avatar_key()
     {
         var handler = new CaptureHttpHandler();
         var relay = new RelayHttpClient(new HttpClient(handler), () => (new Uri("https://relay.example"), "envoy.secret"));
-        await relay.UpdateProfileAsync("Nova · Owner", "envoys/envoy-1/profile.webp", new Dictionary<string, bool> { ["consult"] = true });
+        await relay.UpdateProfileAsync("Nova · Owner", new Dictionary<string, bool> { ["consult"] = true });
         using var body = JsonDocument.Parse(handler.Body!);
-        Assert.Equal(["avatarObjectKey", "personaName", "scenarioToggles"], body.RootElement.EnumerateObject().Select(x => x.Name).Order().ToArray());
+        Assert.Equal(["personaName", "scenarioToggles"], body.RootElement.EnumerateObject().Select(x => x.Name).Order().ToArray());
+        Assert.False(body.RootElement.TryGetProperty("avatarObjectKey", out _));
         Assert.Equal("Bearer", handler.AuthorizationScheme); Assert.Equal("envoy.secret", handler.AuthorizationParameter);
     }
 
