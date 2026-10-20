@@ -6,11 +6,13 @@ public sealed record SecretHit(string Rule, int Line);
 
 public sealed class SecretScanner
 {
+    private static readonly Regex NamedSecretAssignment = new(
+        """(?im)\b(?<key>api[_-]?key|access[_-]?token|auth[_-]?token|token|client[_-]?secret|password)\b\s*[:=]\s*(?<value>"[^"\r\n]+"|'[^'\r\n]+'|[^\s,;)\]}]+)""",
+        RegexOptions.Compiled);
     private static readonly (string Name, Regex Pattern)[] Rules =
     [
         ("private-key", new(@"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
         ("jwt", new(@"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b", RegexOptions.Compiled)),
-        ("named-secret", new("""(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|client[_-]?secret|password)\b\s*[:=]\s*["']?[A-Za-z0-9_./+\-=]{8,}""", RegexOptions.Compiled)),
         ("provider-key", new(@"\b(?:AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
         ("connection-string", new(@"(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis):\/\/[^\s]+", RegexOptions.Compiled))
     ];
@@ -21,6 +23,9 @@ public sealed class SecretScanner
         foreach (var (name, pattern) in Rules)
             foreach (Match match in pattern.Matches(text))
                 hits.Add(new(name, 1 + text.AsSpan(0, match.Index).Count('\n')));
+        foreach (Match match in NamedSecretAssignment.Matches(text))
+            if (LooksLikeAssignedSecret(match.Groups["key"].Value, match.Groups["value"].Value))
+                hits.Add(new("named-secret", 1 + text.AsSpan(0, match.Index).Count('\n')));
         var pathStripped = Regex.Replace(text, @"\b[A-Za-z]:[\\/][^\s\""'<>]+|(?:^|\s)/(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]+", "");
         foreach (Match match in Regex.Matches(pathStripped, @"\b[A-Za-z0-9+/_=-]{32,}\b"))
         {
@@ -31,6 +36,43 @@ public sealed class SecretScanner
             if (entropy >= 3.7) hits.Add(new("high-entropy", 1 + text.AsSpan(0, Math.Min(match.Index, text.Length)).Count('\n')));
         }
         return hits;
+    }
+
+    private static bool LooksLikeAssignedSecret(string key, string rawValue)
+    {
+        var quoted = rawValue.Length >= 2
+            && rawValue[0] is '\'' or '"'
+            && rawValue[^1] == rawValue[0];
+        var value = quoted ? rawValue[1..^1] : rawValue;
+        if (value.Length < 8 || IsPlaceholder(value)) return false;
+        if (!quoted && Regex.IsMatch(value, @"^[A-Za-z_][A-Za-z0-9_.]*\(")) return false;
+
+        var strongKey = key.Contains("key", StringComparison.OrdinalIgnoreCase)
+            || key.Contains("secret", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("password", StringComparison.OrdinalIgnoreCase);
+        if (quoted && strongKey) return true;
+
+        var hasUpper = value.Any(char.IsUpper);
+        var hasLower = value.Any(char.IsLower);
+        var hasDigit = value.Any(char.IsDigit);
+        var hasSymbol = value.Any(ch => !char.IsLetterOrDigit(ch) && ch is not '_' and not '-');
+        var varied = value.Distinct().Count() >= 8;
+        return value.Length >= 16 && varied
+            && ((hasDigit && (hasUpper || hasSymbol))
+                || (quoted && hasUpper && hasLower && value.Length >= 20));
+    }
+
+    private static bool IsPlaceholder(string value)
+    {
+        var normalized = value.Trim().ToLowerInvariant();
+        return normalized.StartsWith("${", StringComparison.Ordinal)
+            || normalized.StartsWith("{{", StringComparison.Ordinal)
+            || normalized.StartsWith('<')
+            || normalized.Contains("placeholder", StringComparison.Ordinal)
+            || normalized.Contains("redacted", StringComparison.Ordinal)
+            || normalized.Contains("example", StringComparison.Ordinal)
+            || normalized.StartsWith("your_", StringComparison.Ordinal)
+            || normalized.StartsWith("your-", StringComparison.Ordinal);
     }
 }
 

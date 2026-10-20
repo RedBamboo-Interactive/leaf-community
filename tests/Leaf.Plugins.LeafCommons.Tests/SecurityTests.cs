@@ -152,9 +152,71 @@ public sealed class SecurityTests : IDisposable
     [Fact]
     public void Action_protocol_rejects_unknown_malformed_and_extra_fields()
     {
+        Assert.IsType<ListShareableAction>(EnvoyActionProtocol.Parse("{\"action\":\"list_shareable\"}"));
         Assert.Throws<InvalidDataException>(() => EnvoyActionProtocol.Parse("not-json"));
         Assert.Throws<InvalidDataException>(() => EnvoyActionProtocol.Parse("{\"action\":\"shell\",\"command\":\"dir\"}"));
+        Assert.Throws<InvalidDataException>(() => EnvoyActionProtocol.Parse("{\"action\":\"list_shareable\",\"surprise\":true}"));
         Assert.Throws<InvalidDataException>(() => EnvoyActionProtocol.Parse("{\"action\":\"done\",\"surprise\":true}"));
+    }
+
+    [Fact]
+    public async Task Shareable_search_matches_terms_case_insensitively_ranks_all_terms_and_returns_snippets()
+    {
+        var copy = Path.Combine(root, "copy");
+        Directory.CreateDirectory(copy);
+        await File.WriteAllTextAsync(Path.Combine(copy, "README.md"),
+            "Nova Commons relay\nThe consult turn rule and EXCHANGE CAP prevent loops.\n");
+        await File.WriteAllTextAsync(Path.Combine(copy, "other.txt"), "A relay transports messages.\n");
+
+        var hits = await new ShareableStore(copy).SearchAsync("relay exchange cap");
+
+        Assert.Equal(2, hits.Count);
+        Assert.Equal("README.md", hits[0].Path);
+        Assert.True(hits[0].AllTerms);
+        Assert.Equal(2, hits[0].Line);
+        Assert.Contains("EXCHANGE CAP", hits[0].Snippet);
+        Assert.False(hits[1].AllTerms);
+    }
+
+    [Fact]
+    public async Task Empty_search_observation_gives_the_model_a_recovery_instruction()
+    {
+        var copy = Path.Combine(root, "copy"); Directory.CreateDirectory(copy);
+        await File.WriteAllTextAsync(Path.Combine(copy, "README.md"), "ordinary engineering material");
+        var model = new PromptCapturingModel([
+            "{\"action\":\"search_shareable\",\"query\":\"absent phrase\"}",
+            "{\"action\":\"done\",\"summary\":\"not covered\"}"
+        ]);
+        var runner = new EnvoyRunner(model, new ShareableStore(copy), new FakeRelay(),
+            new OutboundFilter(new SecretScanner()), new MemoryAudit(), [], []);
+
+        await runner.RunAsync(new("thread", "ping", "question"));
+
+        Assert.Contains("No results. Try different or broader individual terms", model.Prompts[1]);
+        Assert.Contains("shareable_index", model.Prompts[0]);
+        Assert.Contains("README.md", model.Prompts[0]);
+    }
+
+    [Fact]
+    public async Task Identical_action_gets_one_correction_then_fails_without_eight_calls()
+    {
+        var copy = Path.Combine(root, "copy"); Directory.CreateDirectory(copy);
+        var model = new PromptCapturingModel(Enumerable.Repeat(
+            "{\"action\":\"search_shareable\",\"query\":\"missing\"}", 8));
+        var relay = new FakeRelay();
+        var audit = new MemoryAudit();
+        var runner = new EnvoyRunner(model, new ShareableStore(copy), relay,
+            new OutboundFilter(new SecretScanner()), audit, [], []);
+
+        var result = await runner.RunAsync(new("thread", "ping", "question", Addressed: true));
+
+        Assert.Equal("failed", result.State);
+        Assert.Equal("repeated_action", result.Summary);
+        Assert.Equal(3, model.Prompts.Count);
+        Assert.Contains("identical to the previous action", model.Prompts[2]);
+        Assert.Single(relay.Posts);
+        Assert.Contains("shared engineering material", relay.Posts[0]);
+        Assert.Contains(audit.Events, x => x.Name == "envoy_failed" && Equals(x.Data["reason"], "repeated_action"));
     }
 
     [Fact]
@@ -184,6 +246,48 @@ public sealed class SecurityTests : IDisposable
         Assert.Contains(audit.Events, x => x.Name == "envoy_done" && Equals(x.Data["steps"], 1));
     }
 
+    [Fact]
+    public async Task First_accepted_post_completes_the_run_without_duplicate_answers()
+    {
+        var copy = Path.Combine(root, "copy"); Directory.CreateDirectory(copy);
+        var model = new PromptCapturingModel([
+            "{\"action\":\"post\",\"content\":\"first answer\"}",
+            "{\"action\":\"post\",\"content\":\"duplicate answer\"}"
+        ]);
+        var relay = new FakeRelay();
+        var audit = new MemoryAudit();
+        var runner = new EnvoyRunner(model, new ShareableStore(copy), relay,
+            new OutboundFilter(new SecretScanner()), audit, [], []);
+
+        var result = await runner.RunAsync(new("thread", "ping", "question", Addressed: true));
+
+        Assert.Equal("done", result.State);
+        Assert.Equal(1, result.Steps);
+        Assert.Equal("first answer", result.Summary);
+        Assert.Equal(["first answer"], relay.Posts);
+        Assert.Single(model.Prompts);
+        Assert.Single(audit.Events, x => x.Name == "envoy_done");
+    }
+
+    [Fact]
+    public async Task Addressed_done_summary_cannot_bypass_the_outbound_filter_or_silence_the_thread()
+    {
+        var copy = Path.Combine(root, "copy"); Directory.CreateDirectory(copy);
+        var relay = new FakeRelay();
+        var runner = new EnvoyRunner(
+            new ScriptedModel(["{\"action\":\"done\",\"summary\":\"CANARY-PRIVATE\"}"]),
+            new ShareableStore(copy), relay, new OutboundFilter(new SecretScanner()),
+            new MemoryAudit(), [], ["CANARY-PRIVATE"]);
+
+        var result = await runner.RunAsync(new("thread", "ping", "question", Addressed: true));
+
+        Assert.Equal("done", result.State);
+        Assert.DoesNotContain("CANARY-PRIVATE", result.Summary);
+        Assert.Single(relay.Posts);
+        Assert.DoesNotContain("CANARY-PRIVATE", relay.Posts[0]);
+        Assert.Contains("shared engineering material", relay.Posts[0]);
+    }
+
     [Theory]
     [InlineData("My zephyr-private note", "personal-word", false)]
     [InlineData("CANARY-12345", "canary", true)]
@@ -203,6 +307,24 @@ public sealed class SecurityTests : IDisposable
     [InlineData("A token budget is not an authentication token.")]
     public void Outbound_filter_has_no_false_positive_on_ordinary_engineering_text(string text) =>
         Assert.True(new OutboundFilter(new SecretScanner()).Check(text, ["family-only"], ["CANARY-12345"]).Allowed);
+
+    [Theory]
+    [InlineData("var token = tokens.IssueSystem(request);")]
+    [InlineData("var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=');")]
+    [InlineData("const access_token = request.accessToken;")]
+    [InlineData("password = options.Password;")]
+    [InlineData("The code accepts a client_secret field but never prints its value.")]
+    [InlineData("token = \"example-token-value\"")]
+    public void Named_secret_rule_allows_code_that_mentions_secret_concepts(string text) =>
+        Assert.DoesNotContain(new SecretScanner().Scan(text), hit => hit.Rule == "named-secret");
+
+    [Theory]
+    [InlineData("api_key = ABCDEFGHIJKLMNOPQRSTUVWXYZ123")]
+    [InlineData("access_token = \"ThisIsARealCredentialValue123\"")]
+    [InlineData("client_secret: 'correct horse battery staple'")]
+    [InlineData("password = \"not-for-source-control\"")]
+    public void Named_secret_rule_still_rejects_assigned_secret_values(string text) =>
+        Assert.Contains(new SecretScanner().Scan(text), hit => hit.Rule == "named-secret");
 
     [Fact]
     public async Task Injection_cannot_read_outside_copy_or_post_canary()
@@ -266,6 +388,17 @@ internal sealed class ScriptedModel(IEnumerable<string> actions) : IToolFreeMode
     private readonly Queue<string> actions = new(actions);
     public Task<string> GenerateActionAsync(string system, string prompt, EnvoyModelContext context,
         CancellationToken ct = default) => Task.FromResult(actions.Dequeue());
+}
+internal sealed class PromptCapturingModel(IEnumerable<string> actions) : IToolFreeModelClient
+{
+    private readonly Queue<string> actions = new(actions);
+    public List<string> Prompts { get; } = [];
+    public Task<string> GenerateActionAsync(string system, string prompt, EnvoyModelContext context,
+        CancellationToken ct = default)
+    {
+        Prompts.Add(prompt);
+        return Task.FromResult(actions.Dequeue());
+    }
 }
 internal sealed class FakeRelay : IEnvoyRelay
 {

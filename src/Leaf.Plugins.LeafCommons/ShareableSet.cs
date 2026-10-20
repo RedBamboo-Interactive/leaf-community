@@ -1,11 +1,15 @@
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Leaf.Plugins.LeafCommons;
 
 public sealed record ShareableExclusion(string Source, string Reason);
 public sealed record ShareableBuildResult(int Copied, IReadOnlyList<ShareableExclusion> Excluded);
+public sealed record ShareableSearchHit(
+    string Path, int Line, string Snippet, int Score,
+    IReadOnlyList<string> MatchedTerms, bool AllTerms);
 public sealed record ProcessExecutionResult(int ExitCode, byte[] StandardOutput, string StandardError);
 
 public interface IProcessLauncher
@@ -236,6 +240,7 @@ public sealed class ShareableSetBuilder
 
 public sealed class ShareableStore
 {
+    private static readonly Regex SearchTerm = new(@"[\p{L}\p{N}][\p{L}\p{N}_-]*", RegexOptions.Compiled);
     private readonly string root;
     public ShareableStore(string root) => this.root = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
     public string RootPath => root.TrimEnd(Path.DirectorySeparatorChar);
@@ -249,19 +254,79 @@ public sealed class ShareableStore
         return await File.ReadAllTextAsync(full, ct);
     }
 
-    public async Task<IReadOnlyList<string>> SearchAsync(string query, int limit = 20, CancellationToken ct = default)
+    public Task<IReadOnlyList<string>> ListAsync(int limit = 200, CancellationToken ct = default)
+    {
+        if (limit < 1 || limit > 2_000) throw new ArgumentOutOfRangeException(nameof(limit));
+        if (!Directory.Exists(root)) return Task.FromResult<IReadOnlyList<string>>([]);
+        var files = EnumerateFilesWithoutReparse(root)
+            .Select(file =>
+            {
+                ct.ThrowIfCancellationRequested();
+                RejectReparseChain(file);
+                return Path.GetRelativePath(root, file).Replace('\\', '/');
+            })
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .Take(limit)
+            .ToArray();
+        return Task.FromResult<IReadOnlyList<string>>(files);
+    }
+
+    public async Task<IReadOnlyList<ShareableSearchHit>> SearchAsync(string query, int limit = 20, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(query) || query.Length > 200) throw new ArgumentException("Invalid query");
-        var found = new List<string>();
+        if (limit < 1 || limit > 100) throw new ArgumentOutOfRangeException(nameof(limit));
+        var terms = SearchTerm.Matches(query)
+            .Select(match => match.Value)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (terms.Length == 0) throw new ArgumentException("Query must contain a searchable term");
+        var found = new List<ShareableSearchHit>();
         if (!Directory.Exists(root)) return found;
         foreach (var file in EnumerateFilesWithoutReparse(root))
         {
+            ct.ThrowIfCancellationRequested();
             RejectReparseChain(file);
             var text = await File.ReadAllTextAsync(file, ct);
-            if (text.Contains(query, StringComparison.OrdinalIgnoreCase)) found.Add(Path.GetRelativePath(root, file).Replace('\\', '/'));
-            if (found.Count >= limit) break;
+            var relative = Path.GetRelativePath(root, file).Replace('\\', '/');
+            var matched = terms.Where(term =>
+                    text.Contains(term, StringComparison.OrdinalIgnoreCase)
+                    || relative.Contains(term, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (matched.Length == 0) continue;
+
+            var lines = text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+            var bestLine = 0;
+            var bestLineScore = -1;
+            for (var index = 0; index < lines.Length; index++)
+            {
+                var lineScore = terms.Count(term => lines[index].Contains(term, StringComparison.OrdinalIgnoreCase)) * 10;
+                if (lines[index].Contains(query, StringComparison.OrdinalIgnoreCase)) lineScore += 40;
+                if (lineScore > bestLineScore)
+                {
+                    bestLine = index;
+                    bestLineScore = lineScore;
+                }
+            }
+
+            var allTerms = matched.Length == terms.Length;
+            var pathMatches = terms.Count(term => relative.Contains(term, StringComparison.OrdinalIgnoreCase));
+            var score = matched.Length * 10 + pathMatches * 4 + Math.Max(0, bestLineScore)
+                + (allTerms ? 100 : 0)
+                + (text.Contains(query, StringComparison.OrdinalIgnoreCase) ? 40 : 0);
+            var snippet = lines.Length == 0 ? "" : Collapse(lines[bestLine]);
+            found.Add(new(relative, bestLine + 1, snippet, score, matched, allTerms));
         }
-        return found;
+        return found
+            .OrderByDescending(hit => hit.Score)
+            .ThenBy(hit => hit.Path, StringComparer.OrdinalIgnoreCase)
+            .Take(limit)
+            .ToArray();
+    }
+
+    private static string Collapse(string value)
+    {
+        var collapsed = Regex.Replace(value.Trim(), @"\s+", " ");
+        return collapsed.Length <= 240 ? collapsed : collapsed[..239] + "…";
     }
 
     private static IEnumerable<string> EnumerateFilesWithoutReparse(string start)

@@ -10,6 +10,8 @@ public sealed class LiveToolFreeTests
     [Fact]
     public async Task Live_verified_tool_free_generate_path_once()
     {
+        if (!string.Equals(Environment.GetEnvironmentVariable("LEAF_COMMONS_LIVE_TOOLFREE"), "1",
+                StringComparison.Ordinal)) return;
         var token = Environment.GetEnvironmentVariable("REDLEAF_EXECUTION_TOKEN");
         if (string.IsNullOrWhiteSpace(token)) return;
         using var http = new HttpClient { BaseAddress = new Uri("http://127.0.0.1:18800"), Timeout = TimeSpan.FromMinutes(3) };

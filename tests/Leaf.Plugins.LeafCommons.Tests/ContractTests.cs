@@ -17,6 +17,8 @@ public sealed class ContractTests
         var result = await new ToolFreeModelClient(gateway).GenerateActionAsync("system", "prompt", new("thread-1", "ping-1"));
         using var body = JsonDocument.Parse(gateway.Body!);
         Assert.Equal("anthropic-direct", body.RootElement.GetProperty("provider").GetString());
+        Assert.Equal("standard", body.RootElement.GetProperty("qualityTier").GetString());
+        Assert.False(body.RootElement.TryGetProperty("model", out _));
         Assert.True(body.RootElement.GetProperty("requireToolFree").GetBoolean());
         Assert.Equal("oneshot", body.RootElement.GetProperty("mode").GetString());
         Assert.False(body.RootElement.GetProperty("confidential").GetBoolean());
