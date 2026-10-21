@@ -134,6 +134,34 @@ public sealed class PublicAgentRuntime(
     CommonsStateStore state,
     IDigestSink digests)
 {
+    public async Task HandleListeningEventAsync(
+        string agentEntityId, RelayListeningEvent listening, CancellationToken ct = default)
+    {
+        var configuration = await state.GetConfigurationAsync(ct);
+        var agent = configuration.Agents.FirstOrDefault(item => item.Enabled && string.Equals(
+            item.AgentEntityId, agentEntityId, StringComparison.OrdinalIgnoreCase));
+        if (agent is null) return;
+        var decision = filter.Check(listening.Content, configuration.Owner.PersonalWords,
+            configuration.Owner.Canaries);
+        if (!decision.Allowed)
+        {
+            await state.RecordAsync("listening_event_blocked", Metadata(agentEntityId,
+                ("event_id", listening.Id), ("reason", decision.Rule)), ct);
+            return;
+        }
+        var channel = string.IsNullOrWhiteSpace(listening.Channel)
+            ? "relay" : listening.Channel.Trim();
+        var snippet = string.Join(' ', listening.Content.Split(
+            ['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        if (snippet.Length > 600) snippet = snippet[..599] + "…";
+        var ownerNotice = string.Equals(listening.Type, "owner_notice", StringComparison.Ordinal);
+        var content = ownerNotice
+            ? $"Relay notice: {snippet}"
+            : $"New announcement in #{channel}: {snippet}";
+        await digests.DeliverAsync(new(ownerNotice ? "owner_notice" : "announcement",
+            content, null, agentEntityId, channel), ct);
+    }
+
     public async Task<EnvoyRunResult> HandleAsync(
         string agentEntityId, EnvoyRunRequest request, CancellationToken ct = default)
     {

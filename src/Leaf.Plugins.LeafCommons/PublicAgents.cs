@@ -298,7 +298,9 @@ public sealed class PublicAgentCoordinator(
 
     private RelayConnector CreateConnector(string agentEntityId)
     {
-        var core = new ConnectorCore((request, ct) => runtime.HandleAsync(agentEntityId, request, ct));
+        var core = new ConnectorCore(
+            (request, ct) => runtime.HandleAsync(agentEntityId, request, ct),
+            (listening, ct) => runtime.HandleListeningEventAsync(agentEntityId, listening, ct));
         return new RelayConnector(async ct =>
         {
             var configuration = await state.GetConfigurationAsync(ct).ConfigureAwait(false);

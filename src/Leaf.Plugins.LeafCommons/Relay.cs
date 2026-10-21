@@ -289,7 +289,12 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
     }
 }
 
-public sealed class ConnectorCore(Func<EnvoyRunRequest, CancellationToken, Task> handler)
+public sealed record RelayListeningEvent(
+    string Id, string Type, string Channel, string Content, string? Sender, string? ThreadRef);
+
+public sealed class ConnectorCore(
+    Func<EnvoyRunRequest, CancellationToken, Task> handler,
+    Func<RelayListeningEvent, CancellationToken, Task>? listeningHandler = null)
 {
     private readonly HashSet<string> processed = new(StringComparer.Ordinal);
 
@@ -302,11 +307,25 @@ public sealed class ConnectorCore(Func<EnvoyRunRequest, CancellationToken, Task>
         var type = frame.GetProperty("type").GetString();
         if (type is "ping" or "event" or "owner_notice")
         {
-            var thread = frame.TryGetProperty("threadRef", out var threadNode) && threadNode.ValueKind == JsonValueKind.String ? threadNode.GetString()! : "announcements";
+            var thread = frame.TryGetProperty("threadRef", out var threadNode)
+                && threadNode.ValueKind == JsonValueKind.String
+                ? threadNode.GetString() : null;
             var content = frame.TryGetProperty("content", out var contentNode) ? contentNode.GetString() ?? "" : frame.TryGetProperty("reason", out var reason) ? reason.GetString() ?? "owner notice" : "owner notice";
             var kind = type == "ping" && frame.TryGetProperty("scenario", out var scenario) ? scenario.GetString() ?? "consult_reply" : type;
             var sender = frame.TryGetProperty("sender", out var senderNode) ? senderNode.GetRawText() : null;
-            await handler(new(thread, kind, content, sender, id, Addressed: type == "ping"), ct);
+            var channel = frame.TryGetProperty("channel", out var channelNode)
+                && channelNode.ValueKind == JsonValueKind.String
+                ? channelNode.GetString() ?? "" : "";
+            var listeningOnly = type == "owner_notice" || (type == "event"
+                && (string.IsNullOrWhiteSpace(thread)
+                    || string.Equals(channel, "announcements", StringComparison.OrdinalIgnoreCase)));
+            if (listeningOnly)
+            {
+                if (listeningHandler is not null)
+                    await listeningHandler(new(id, type!, channel, content, sender, thread), ct);
+            }
+            else
+                await handler(new(thread, kind, content, sender, id, Addressed: type == "ping"), ct);
         }
         await ack(id);
         return true;

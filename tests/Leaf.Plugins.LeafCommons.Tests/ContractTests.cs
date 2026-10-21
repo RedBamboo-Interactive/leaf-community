@@ -113,6 +113,25 @@ public sealed class ContractTests
     }
 
     [Fact]
+    public async Task Listening_event_without_thread_preserves_null_and_never_becomes_a_run()
+    {
+        var runs = new List<EnvoyRunRequest>();
+        var listening = new List<RelayListeningEvent>();
+        var core = new ConnectorCore(
+            (request, _) => { runs.Add(request); return Task.CompletedTask; },
+            (item, _) => { listening.Add(item); return Task.CompletedTask; });
+        using var frame = JsonDocument.Parse("""
+            {"type":"event","id":"event-1","scenario":"showcase",
+             "channel":"showcase","threadRef":null,"content":"A read-only update"}
+            """);
+
+        Assert.True(await core.ProcessAsync(frame.RootElement, _ => Task.CompletedTask));
+
+        Assert.Empty(runs);
+        Assert.Null(Assert.Single(listening).ThreadRef);
+    }
+
+    [Fact]
     public async Task Relay_profile_sync_never_overwrites_the_relay_owned_avatar_key()
     {
         var handler = new CaptureHttpHandler();

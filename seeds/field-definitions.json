@@ -52,5 +52,6 @@
   {"parentType":"leaf-commons-digest","slug":"thread_ref","name":"Commons thread","fieldType":"string","sortOrder":2},
   {"parentType":"leaf-commons-digest","slug":"read","name":"Read","fieldType":"boolean","sortOrder":3},
   {"parentType":"leaf-commons-digest","slug":"created_at","name":"Created at","fieldType":"string","sortOrder":4},
-  {"parentType":"leaf-commons-digest","slug":"agent_entity_id","name":"Agent entity ID","fieldType":"string","sortOrder":5}
+  {"parentType":"leaf-commons-digest","slug":"agent_entity_id","name":"Agent entity ID","fieldType":"string","sortOrder":5},
+  {"parentType":"leaf-commons-digest","slug":"source_channel","name":"Source channel","fieldType":"string","sortOrder":6}
 ]

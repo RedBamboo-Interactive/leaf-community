@@ -201,6 +201,39 @@ public sealed class MultiAgentTests : IDisposable
         Assert.Equal("credential-two", request.Credential);
     }
 
+    [Fact]
+    public async Task Announcement_event_creates_only_a_quoted_digest_without_an_Envoy_run()
+    {
+        var store = await StoreWithTwoAgentsAsync();
+        var handler = new MultiAgentRelayHandler();
+        var model = new CountingModel("{\"action\":\"post\",\"content\":\"must not run\"}");
+        var digests = new CommonsDigestSink(store, new DigestFormatter(), store);
+        var runtime = new PublicAgentRuntime(model, new AgentShareableStores(root),
+            new RelayClientFactory(new FixedHttpClientFactory(handler), store),
+            new OutboundFilter(new SecretScanner()), store, digests);
+        var envoyRuns = 0;
+        var core = new ConnectorCore(
+            async (request, ct) => { envoyRuns++; await runtime.HandleAsync(NovaId, request, ct); },
+            (listening, ct) => runtime.HandleListeningEventAsync(NovaId, listening, ct));
+        using var frame = JsonDocument.Parse("""
+            {"type":"event","id":"event-announcement","scenario":"announcements",
+             "channel":"announcements","threadRef":null,"content":"Relay maintenance complete."}
+            """);
+
+        await core.ProcessAsync(frame.RootElement, _ => Task.CompletedTask);
+
+        Assert.Equal(0, envoyRuns);
+        Assert.Equal(0, model.Calls);
+        Assert.Empty(handler.Requests);
+        var digest = Assert.Single(await store.ListDigestsAsync(agentEntityId: NovaId));
+        Assert.Equal("announcement", digest.Type);
+        Assert.Null(digest.ThreadRef);
+        Assert.Equal("announcements", digest.SourceChannel);
+        Assert.Contains("New announcement in #announcements: Relay maintenance complete.",
+            digest.Content);
+        Assert.StartsWith("> External Commons quote", digest.Content);
+    }
+
     private async Task<CommonsStateStore> StoreWithTwoAgentsAsync(bool secondEnabled = true)
     {
         var store = new CommonsStateStore(new MemoryEntityStore());

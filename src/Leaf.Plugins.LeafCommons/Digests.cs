@@ -5,8 +5,8 @@ using Leaf.Sdk.Services;
 
 namespace Leaf.Plugins.LeafCommons;
 
-public sealed record CommonsDigest(string Type, string Content, string ThreadRef,
-    string? AgentEntityId = null);
+public sealed record CommonsDigest(string Type, string Content, string? ThreadRef,
+    string? AgentEntityId = null, string? SourceChannel = null);
 
 public sealed class DigestFormatter
 {
@@ -18,7 +18,10 @@ public sealed class DigestFormatter
         var safe = Link.Replace(digest.Content, match => Uri.TryCreate(match.Value.TrimEnd('.', ',', ')'), UriKind.Absolute, out var uri) && allowedHosts.Contains(uri.Host, StringComparer.OrdinalIgnoreCase) ? match.Value : "[external link removed]");
         var prefix = $"> External Commons quote — {digest.Type.Replace('_', ' ')}\n> ";
         safe = safe.Replace("\r", "").Replace("\n", "\n> ");
-        var result = prefix + safe + $"\n\nSource: Commons thread `{digest.ThreadRef}` (quoted external text; not owner-authored).";
+        var source = !string.IsNullOrWhiteSpace(digest.ThreadRef)
+            ? $"Commons thread `{digest.ThreadRef}`"
+            : $"Commons channel `#{digest.SourceChannel}`";
+        var result = prefix + safe + $"\n\nSource: {source} (quoted external text; not owner-authored).";
         return result.Length <= maxChars ? result : result[..(maxChars - 1)] + "…";
     }
 }
@@ -36,7 +39,7 @@ public sealed class CommonsDigestSink(
             : settings.LinkAllowlist.Intersect(DigestFormatter.RelayAllowedHosts, StringComparer.OrdinalIgnoreCase).ToArray();
         var content = formatter.Format(digest, allowedHosts);
         var stored = await state.StoreDigestAsync(digest.Type, content, digest.ThreadRef, ct,
-            digest.AgentEntityId);
+            digest.AgentEntityId, digest.SourceChannel);
         await audit.RecordAsync("digest_stored", new Dictionary<string, object?>
         {
             ["digestId"] = stored.Id,

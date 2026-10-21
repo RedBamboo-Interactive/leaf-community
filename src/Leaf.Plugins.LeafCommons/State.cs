@@ -112,8 +112,8 @@ public sealed record CommonsConfiguration(
     IReadOnlyList<PublicAgentSettings> Agents);
 
 public sealed record StoredDigest(
-    Guid Id, string Type, string Content, string ThreadRef, bool Read,
-    DateTimeOffset CreatedAt, string? AgentEntityId = null);
+    Guid Id, string Type, string Content, string? ThreadRef, bool Read,
+    DateTimeOffset CreatedAt, string? AgentEntityId = null, string? SourceChannel = null);
 
 public sealed record StoredBrief(
     Guid Id, string Kind, string? Title, string ContentHash, string Outcome,
@@ -241,8 +241,8 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
     }
 
     public async Task<StoredDigest> StoreDigestAsync(
-        string type, string content, string threadRef, CancellationToken ct = default,
-        string? agentEntityId = null)
+        string type, string content, string? threadRef, CancellationToken ct = default,
+        string? agentEntityId = null, string? sourceChannel = null)
     {
         agentEntityId ??= (await ListPublicAgentsAsync(enabledOnly: true, ct: ct))
             .Select(agent => agent.AgentEntityId).SingleOrDefault();
@@ -250,14 +250,19 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
             throw new ArgumentException("Unknown digest type", nameof(type));
         if (string.IsNullOrWhiteSpace(content) || content.Length > 1200)
             throw new ArgumentException("Digest content must be 1-1200 characters", nameof(content));
-        if (string.IsNullOrWhiteSpace(threadRef) || threadRef.Length > 200)
-            throw new ArgumentException("Digest thread reference must be 1-200 characters", nameof(threadRef));
+        if (threadRef?.Length > 200)
+            throw new ArgumentException("Digest thread reference must be at most 200 characters", nameof(threadRef));
+        if (string.IsNullOrWhiteSpace(threadRef) && string.IsNullOrWhiteSpace(sourceChannel))
+            throw new ArgumentException("A digest requires a thread reference or source channel");
+        if (sourceChannel?.Length > 100)
+            throw new ArgumentException("Digest source channel must be at most 100 characters", nameof(sourceChannel));
         var createdAt = DateTimeOffset.UtcNow;
         var entity = await entities.CreateAsync("leaf-commons-digest", $"{type.Replace('_', ' ')} digest", new JsonObject
         {
             ["digest_type"] = type,
             ["content"] = content,
             ["thread_ref"] = threadRef,
+            ["source_channel"] = sourceChannel,
             ["agent_entity_id"] = agentEntityId,
             ["read"] = false,
             ["created_at"] = createdAt.ToString("O")
@@ -507,10 +512,13 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         var createdAt = DateTimeOffset.TryParse(S(entity.Data, "created_at"), out var parsed)
             ? parsed
             : entity.CreatedAt;
+        var sourceChannel = S(entity.Data, "source_channel");
+        var threadRef = S(entity.Data, "thread_ref");
+        if (threadRef is null && sourceChannel is null) threadRef = "unknown";
         return new(entity.Id, S(entity.Data, "digest_type") ?? "owner_notice",
-            S(entity.Data, "content") ?? "", S(entity.Data, "thread_ref") ?? "unknown",
+            S(entity.Data, "content") ?? "", threadRef,
             entity.Data["read"]?.GetValue<bool>() == true, createdAt,
-            S(entity.Data, "agent_entity_id"));
+            S(entity.Data, "agent_entity_id"), sourceChannel);
     }
 
     private static StoredBrief ToBrief(LeafEntity entity)
