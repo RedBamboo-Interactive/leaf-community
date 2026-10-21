@@ -40,6 +40,7 @@ public sealed class LeafCommonsPlugin : ILeafPlugin
             sp.GetRequiredService<ICommonsAudit>()));
         services.AddSingleton<CommonsDigestSink>();
         services.AddSingleton<IDigestSink>(sp => sp.GetRequiredService<CommonsDigestSink>());
+        services.AddSingleton<PublicNovaThreads>();
         services.AddSingleton(sp => new CommonsNovaContextExtension(
             sp.GetRequiredKeyedService<IPluginExtensions>(PluginId),
             sp.GetRequiredService<CommonsStateStore>()));

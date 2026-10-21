@@ -5,7 +5,7 @@ using Leaf.Sdk.Services;
 
 namespace Leaf.Plugins.LeafCommons;
 
-public sealed record SettingsUpdate(string RelayBaseUrl, string? Credential, string Persona,
+public sealed record SettingsUpdate(string RelayBaseUrl, string? Credential, string PublicName,
     Dictionary<string, bool> ScenarioToggles, string[] ShareableFolders, string[] PersonalWords, string[] Canaries,
     string? NovaDiscussionId, string[] LinkAllowlist, string? OwnerUserId, string AgentEntityId,
     string AvatarSource = AvatarSources.AgentAvatar);
@@ -33,9 +33,28 @@ public static class CommonsEndpoints
             var credential = string.IsNullOrWhiteSpace(update.Credential) ? current.Credential : update.Credential;
             var avatarChanged = current.AvatarSource != update.AvatarSource
                 || !string.Equals(current.AgentEntityId, update.AgentEntityId, StringComparison.OrdinalIgnoreCase);
+            var profile = new RelayProfile(current.EffectivePublicName, current.Persona);
+            if (!string.IsNullOrWhiteSpace(credential))
+            {
+                try
+                {
+                    profile = await relayClient.UpdateProfileAtAsync(relay, credential,
+                        update.PublicName, update.ScenarioToggles, ct);
+                }
+                catch (RelayApiException error)
+                {
+                    return Results.Json(new { error = error.Reason, message = error.Message },
+                        statusCode: error.StatusCode);
+                }
+            }
+            else if (!string.Equals(update.PublicName, current.EffectivePublicName, StringComparison.Ordinal))
+            {
+                return Results.Conflict(new { error = "envoy_credential_missing", message = "Connect Public Nova before changing its public name." });
+            }
             var saved = await store.SaveSettingsAsync(current with
             {
-                RelayBaseUrl = relay.ToString(), Credential = credential, Persona = update.Persona,
+                RelayBaseUrl = relay.ToString(), Credential = credential,
+                PublicName = profile.PublicName, Persona = profile.PersonaName,
                 ScenarioToggles = update.ScenarioToggles, ShareableFolders = update.ShareableFolders,
                 PersonalWords = update.PersonalWords, Canaries = update.Canaries,
                 NovaDiscussionId = update.NovaDiscussionId, LinkAllowlist = update.LinkAllowlist,
@@ -48,7 +67,6 @@ public static class CommonsEndpoints
             }, ct);
             if (!string.IsNullOrWhiteSpace(saved.Credential))
             {
-                await relayClient.UpdateProfileAsync(saved.Persona, saved.ScenarioToggles, ct);
                 try { await avatars.SyncAsync(saved, ct); }
                 catch (AvatarSyncException error)
                 {
@@ -76,9 +94,40 @@ public static class CommonsEndpoints
             if (consumed.Status != OAuthStateStatus.Accepted) return OAuthStateFailure(consumed.Status);
             if (!CanCompleteOAuthCallback(before, consumed)) return Results.Conflict(new { error = "active_credential_requires_rejoin" });
             var exchange = await relay.ExchangeAsync(exchangeCode, ct);
-            var saved = await store.SaveSettingsAsync(before with { Credential = exchange.Credential, ConnectionStatus = exchange.Status == "pending" ? "pending approval" : exchange.Status, Persona = exchange.PersonaName, Avatar = exchange.AvatarObjectKey, AvatarContentHash = null }, ct);
+            var saved = await store.SaveSettingsAsync(before with
+            {
+                Credential = exchange.Credential,
+                ConnectionStatus = exchange.Status == "pending" ? "pending approval" : exchange.Status,
+                Persona = exchange.PersonaName,
+                PublicName = exchange.PublicName,
+                EnvoyId = exchange.EnvoyId,
+                Avatar = exchange.AvatarObjectKey,
+                AvatarContentHash = null,
+            }, ct);
             try { await avatars.SyncAsync(saved, ct); } catch (AvatarSyncException) { }
-            return Results.Redirect("/apps/leaf-commons?joined=pending");
+            return Results.Redirect("/extensions/leaf-commons?joined=pending");
+        });
+        group.MapGet("/threads", async (IAuthContext auth, CommonsStateStore store,
+            PublicNovaThreads threads, CancellationToken ct) =>
+        {
+            var settings = await store.GetSettingsAsync(ct);
+            if (!IsOwner(auth, settings)) return Forbidden();
+            try { return Results.Ok(new { items = await threads.ListAsync(settings, ct) }); }
+            catch (RelayApiException error)
+            {
+                return Results.Json(new { error = error.Reason, message = error.Message }, statusCode: error.StatusCode);
+            }
+        });
+        group.MapGet("/threads/{threadRef}", async (string threadRef, IAuthContext auth,
+            CommonsStateStore store, PublicNovaThreads threads, CancellationToken ct) =>
+        {
+            var settings = await store.GetSettingsAsync(ct);
+            if (!IsOwner(auth, settings)) return Forbidden();
+            try { return Results.Ok(await threads.GetAsync(threadRef, settings, ct)); }
+            catch (RelayApiException error)
+            {
+                return Results.Json(new { error = error.Reason, message = error.Message }, statusCode: error.StatusCode);
+            }
         });
         group.MapPost("/briefs", async (BriefSubmission request, HttpContext http,
             CommonsStateStore store, CommonsRuntime runtime, CancellationToken ct) =>

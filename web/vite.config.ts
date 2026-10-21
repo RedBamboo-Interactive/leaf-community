@@ -12,4 +12,6 @@ for(const extension of manifest.frontend?.extensions??[]){
   if(!new RegExp(`(?:^|[,\\s])${extension.id}\\s*:`).test(map))
     throw new Error(`Frontend extension '${extension.id}' is declared in plugin.json but missing from frontendExtensions`)
 }
+if(manifest.frontend?.settings && !/settingsPanel\s*:\s*\{\s*Component\s*:/.test(source))
+  throw new Error("plugin.json declares frontend settings but plugin.tsx has no settingsPanel Component")
 export default defineConfig({plugins:[react(),tailwindcss(),federation({name:manifest.id,filename:"remoteEntry.js",exposes:{".":"./src/index.ts"},shared:{react:{singleton:true},"react/jsx-runtime":{singleton:true},"react-dom":{singleton:true},"react-dom/client":{singleton:true},"react-router-dom":{singleton:true},"@redbamboo/ui":{singleton:true,import:false},"@redbamboo/utility":{singleton:true,import:false}},dts:false})],define:{"process.env.NODE_ENV":JSON.stringify("production")},build:{target:"es2023",emptyOutDir:true,sourcemap:false,lib:{entry:fileURLToPath(new URL("./src/index.ts",import.meta.url)),formats:["es"],fileName:()=>"plugin.js",cssFileName:"plugin"},rollupOptions:{output:{chunkFileNames:"chunks/[name]-[hash].js",assetFileNames:i=>((i.names?.[0]||i.name||"").endsWith(".css")?"plugin.css":"assets/[name]-[hash][extname]")}}}})

@@ -8,36 +8,84 @@ using Microsoft.Extensions.Logging;
 
 namespace Leaf.Plugins.LeafCommons;
 
-public sealed record OAuthExchange(string Credential, string Status, string PersonaName, string EnvoyId, string? AvatarObjectKey);
+public sealed record OAuthExchange(
+    string Credential, string Status, string PersonaName, string PublicName,
+    string EnvoyId, string? AvatarObjectKey);
+public sealed record RelayProfile(string PublicName, string PersonaName);
+public sealed record RelayThreadSummary(
+    string ThreadRef, string ChannelName, string Title, DateTimeOffset LastActivityAt,
+    string LastSnippet, bool Unread, string? Scenario);
+public sealed record RelayThreadAuthor(string Kind, string Name, string? AvatarUrl = null, string? EnvoyId = null);
+public sealed record RelayThreadMessage(
+    string Id, DateTimeOffset At, RelayThreadAuthor Author, string Text, string? Scenario = null);
 
-public sealed class RelayHttpClient(HttpClient http, Func<(Uri BaseUri, string? Credential)> settings) : IEnvoyRelay, IAvatarUploader
+public sealed class RelayApiException(string reason, string message, int statusCode)
+    : Exception(message)
 {
+    public string Reason { get; } = reason;
+    public int StatusCode { get; } = statusCode;
+}
+
+public sealed class RelayFeatureUnavailableException(string feature)
+    : Exception($"Relay feature '{feature}' is unavailable");
+
+public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Task<(Uri BaseUri, string? Credential)>> settings) : IEnvoyRelay, IAvatarUploader
+{
+    public RelayHttpClient(HttpClient http, Func<(Uri BaseUri, string? Credential)> settings)
+        : this(http, _ => Task.FromResult(settings())) { }
+
     public Uri BuildAuthorizeUri(Uri callback, IEnumerable<string> scenarios)
+        => BuildAuthorizeUriAsync(callback, scenarios).GetAwaiter().GetResult();
+
+    public async Task<Uri> BuildAuthorizeUriAsync(Uri callback, IEnumerable<string> scenarios, CancellationToken ct = default)
     {
-        var (baseUri, _) = settings();
+        var (baseUri, _) = await settings(ct);
         if (!(callback.Scheme == "leaf" || (callback.Scheme == "http" && callback.IsLoopback))) throw new ArgumentException("OAuth callback must be leaf: or loopback HTTP");
         return new Uri(baseUri, "/v1/oauth/authorize?connectorRedirectUri=" + Uri.EscapeDataString(callback.ToString()) + "&scenarios=" + Uri.EscapeDataString(string.Join(',', scenarios)));
     }
 
     public async Task<OAuthExchange> ExchangeAsync(string exchangeCode, CancellationToken ct = default)
     {
-        var (baseUri, _) = settings();
+        var (baseUri, _) = await settings(ct);
         using var response = await http.PostAsJsonAsync(new Uri(baseUri, "/v1/oauth/exchange"), new { exchangeCode }, ct);
         response.EnsureSuccessStatusCode();
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
         var root = json.RootElement; var envoy = root.GetProperty("envoy");
-        return new(root.GetProperty("credential").GetString()!, envoy.GetProperty("status").GetString()!, envoy.GetProperty("personaName").GetString()!, envoy.GetProperty("id").GetString()!, envoy.TryGetProperty("avatarObjectKey", out var avatar) ? avatar.GetString() : null);
+        var persona = envoy.GetProperty("personaName").GetString()!;
+        var publicName = envoy.TryGetProperty("publicName", out var publicNameNode)
+            ? publicNameNode.GetString()
+            : CommonsSettings.PublicNameFromPersona(persona);
+        return new(root.GetProperty("credential").GetString()!, envoy.GetProperty("status").GetString()!,
+            persona, publicName ?? "", envoy.GetProperty("id").GetString()!,
+            envoy.TryGetProperty("avatarObjectKey", out var avatar) ? avatar.GetString() : null);
     }
 
-    public async Task UpdateProfileAsync(string persona, IReadOnlyDictionary<string, bool> scenarioToggles, CancellationToken ct = default)
+    public async Task<RelayProfile> UpdateProfileAsync(
+        string publicName, IReadOnlyDictionary<string, bool> scenarioToggles,
+        CancellationToken ct = default)
     {
-        using var response = await SendAsync(HttpMethod.Patch, "/v1/profile", JsonContent.Create(new
-        {
-            personaName = persona,
-            scenarioToggles,
-        }), ct);
-        if (!response.IsSuccessStatusCode)
-            throw new HttpRequestException($"Relay profile update failed with HTTP {(int)response.StatusCode}");
+        var (baseUri, credential) = await settings(ct);
+        return await UpdateProfileAtAsync(baseUri, credential, publicName, scenarioToggles, ct);
+    }
+
+    public async Task<RelayProfile> UpdateProfileAtAsync(
+        Uri baseUri, string? credential, string publicName,
+        IReadOnlyDictionary<string, bool> scenarioToggles, CancellationToken ct = default)
+    {
+        using var response = await SendAuthenticatedAsync(baseUri, credential, HttpMethod.Patch,
+            "/v1/profile", JsonContent.Create(new { publicName, scenarioToggles }), ct);
+        using var json = await ReadJsonAsync(response, ct);
+        if (!response.IsSuccessStatusCode) throw RelayError(response, json.RootElement, "profile_update_failed");
+        var envoy = json.RootElement.TryGetProperty("envoy", out var wrapped)
+            ? wrapped
+            : json.RootElement;
+        var acceptedName = envoy.TryGetProperty("publicName", out var name)
+            ? name.GetString()
+            : publicName;
+        var persona = envoy.TryGetProperty("personaName", out var personaName)
+            ? personaName.GetString()
+            : $"Nova · {acceptedName}";
+        return new(acceptedName ?? publicName, persona ?? $"Nova · {publicName}");
     }
 
     public async Task<AvatarUploadResult> UploadAvatarAsync(byte[] bytes, string contentType, CancellationToken ct = default)
@@ -63,16 +111,52 @@ public sealed class RelayHttpClient(HttpClient http, Func<(Uri BaseUri, string? 
 
     public async Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default)
     {
-        var list = new List<RelayMessage>();
+        var messages = await GetThreadMessagesAsync(threadRef, ct);
+        return messages.Select(item => new RelayMessage(item.Author.Name, item.Text, item.At)).ToArray();
+    }
+
+    public async Task<IReadOnlyList<RelayThreadSummary>> GetThreadsAsync(CancellationToken ct = default)
+    {
+        using var response = await SendAsync(HttpMethod.Get, "/v1/threads?limit=100", null, ct);
+        if (response.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.NotImplemented)
+            throw new RelayFeatureUnavailableException("threads");
+        using var json = await ReadJsonAsync(response, ct);
+        if (!response.IsSuccessStatusCode) throw RelayError(response, json.RootElement, "threads_failed");
+        var items = json.RootElement.TryGetProperty("items", out var list) ? list : default;
+        if (items.ValueKind != JsonValueKind.Array) return [];
+        return items.EnumerateArray().Select(item => new RelayThreadSummary(
+            item.GetProperty("threadRef").GetString() ?? "",
+            String(item, "channelName") ?? String(item, "channel") ?? "",
+            String(item, "title") ?? "",
+            Time(item, "lastActivityAt"),
+            String(item, "lastSnippet") ?? "",
+            Boolean(item, "unread") ?? (Integer(item, "unreadPings") ?? 0) > 0,
+            String(item, "scenario"))).Where(item => item.ThreadRef.Length > 0).ToArray();
+    }
+
+    public async Task<IReadOnlyList<RelayThreadMessage>> GetThreadMessagesAsync(
+        string threadRef, CancellationToken ct = default)
+    {
         var path = "/v1/threads/" + Uri.EscapeDataString(threadRef) + "/messages?limit=100";
-        using var response = await SendAsync(HttpMethod.Get, path, null, ct); response.EnsureSuccessStatusCode();
-        using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
-        foreach (var item in json.RootElement.GetProperty("messages").EnumerateArray())
+        using var response = await SendAsync(HttpMethod.Get, path, null, ct);
+        if (response.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.NotImplemented)
+            throw new RelayFeatureUnavailableException("thread-messages");
+        using var json = await ReadJsonAsync(response, ct);
+        if (!response.IsSuccessStatusCode) throw RelayError(response, json.RootElement, "thread_messages_failed");
+        var list = new List<RelayThreadMessage>();
+        if (!json.RootElement.TryGetProperty("messages", out var messages)
+            || messages.ValueKind != JsonValueKind.Array) return list;
+        foreach (var item in messages.EnumerateArray())
         {
             var actor = item.GetProperty("actor");
-            var author = actor.TryGetProperty("personaName", out var persona) ? persona.GetString() : actor.TryGetProperty("displayName", out var name) ? name.GetString() : actor.GetProperty("kind").GetString();
-            var when = item.TryGetProperty("createdAt", out var created) ? DateTimeOffset.FromUnixTimeMilliseconds(created.GetInt64()) : (DateTimeOffset?)null;
-            list.Add(new(author ?? "unknown", item.GetProperty("content").GetString() ?? "", when));
+            var kind = String(actor, "kind") ?? "human";
+            var name = String(actor, "personaName") ?? String(actor, "displayName") ?? kind;
+            list.Add(new(
+                String(item, "id") ?? Guid.NewGuid().ToString("N"),
+                Time(item, "createdAt"),
+                new(kind, name, String(actor, "avatarUrl"), String(actor, "envoyId")),
+                String(item, "content") ?? "",
+                String(item, "scenario")));
         }
         return list;
     }
@@ -109,11 +193,57 @@ public sealed class RelayHttpClient(HttpClient http, Func<(Uri BaseUri, string? 
 
     private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, HttpContent? content, CancellationToken ct)
     {
-        var (baseUri, credential) = settings();
+        var (baseUri, credential) = await settings(ct);
+        return await SendAuthenticatedAsync(baseUri, credential, method, path, content, ct);
+    }
+
+    private async Task<HttpResponseMessage> SendAuthenticatedAsync(
+        Uri baseUri, string? credential, HttpMethod method, string path, HttpContent? content,
+        CancellationToken ct)
+    {
         if (string.IsNullOrWhiteSpace(credential)) throw new InvalidOperationException("Envoy credential is not configured");
-        var request = new HttpRequestMessage(method, new Uri(baseUri, path)) { Content = content };
+        using var request = new HttpRequestMessage(method, new Uri(baseUri, path)) { Content = content };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credential);
         return await http.SendAsync(request, ct);
+    }
+
+    private static async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        var raw = await response.Content.ReadAsStringAsync(ct);
+        try { return JsonDocument.Parse(string.IsNullOrWhiteSpace(raw) ? "{}" : raw); }
+        catch (JsonException) { return JsonDocument.Parse("{}"); }
+    }
+
+    private static RelayApiException RelayError(
+        HttpResponseMessage response, JsonElement root, string fallback)
+    {
+        var reason = String(root, "error") ?? fallback;
+        var message = String(root, "message") ?? reason;
+        return new(reason, message, (int)response.StatusCode);
+    }
+
+    private static string? String(JsonElement element, string name)
+        => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static bool? Boolean(JsonElement element, string name)
+        => element.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? value.GetBoolean()
+            : null;
+
+    private static int? Integer(JsonElement element, string name)
+        => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number
+            && value.TryGetInt32(out var parsed) ? parsed : null;
+
+    private static DateTimeOffset Time(JsonElement element, string name)
+    {
+        if (!element.TryGetProperty(name, out var value)) return DateTimeOffset.UnixEpoch;
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var milliseconds))
+            return DateTimeOffset.FromUnixTimeMilliseconds(milliseconds);
+        return value.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(value.GetString(), out var parsed)
+            ? parsed
+            : DateTimeOffset.UnixEpoch;
     }
 }
 

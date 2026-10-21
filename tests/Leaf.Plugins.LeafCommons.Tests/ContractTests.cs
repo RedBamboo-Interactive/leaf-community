@@ -14,6 +14,8 @@ public sealed class ContractTests
     public void Manifest_contributes_digest_context_without_system_token_permission()
     {
         var manifest = new LeafCommonsPlugin().Manifest;
+        Assert.Equal("Public Nova", manifest.Name);
+        Assert.Empty(manifest.Frontend!.Extensions);
         var extension = Assert.Single(manifest.Backend!.Extensions);
         Assert.Equal(CommonsNovaContextExtension.ExtensionId, extension.Id);
         Assert.Equal("nova", extension.Target);
@@ -114,12 +116,50 @@ public sealed class ContractTests
     public async Task Relay_profile_sync_never_overwrites_the_relay_owned_avatar_key()
     {
         var handler = new CaptureHttpHandler();
-        var relay = new RelayHttpClient(new HttpClient(handler), () => (new Uri("https://relay.example"), "envoy.secret"));
-        await relay.UpdateProfileAsync("Nova · Owner", new Dictionary<string, bool> { ["consult"] = true });
+        var relay = new RelayHttpClient(new HttpClient(handler), _ => Task.FromResult<(Uri, string?)>((new Uri("https://relay.example"), "envoy.secret")));
+        await relay.UpdateProfileAsync("Owner", new Dictionary<string, bool> { ["consult"] = true });
         using var body = JsonDocument.Parse(handler.Body!);
-        Assert.Equal(["personaName", "scenarioToggles"], body.RootElement.EnumerateObject().Select(x => x.Name).Order().ToArray());
+        Assert.Equal(["publicName", "scenarioToggles"], body.RootElement.EnumerateObject().Select(x => x.Name).Order().ToArray());
+        Assert.Equal("Owner", body.RootElement.GetProperty("publicName").GetString());
         Assert.False(body.RootElement.TryGetProperty("avatarObjectKey", out _));
         Assert.Equal("Bearer", handler.AuthorizationScheme); Assert.Equal("envoy.secret", handler.AuthorizationParameter);
+    }
+
+    [Fact]
+    public async Task OAuth_exchange_reads_the_relay_owned_default_public_name()
+    {
+        var handler = new StaticJsonHandler(HttpStatusCode.OK, new
+        {
+            credential = "envoy.credential",
+            envoy = new
+            {
+                id = "envoy-1", status = "active", publicName = "Laurent",
+                personaName = "Nova · Laurent", avatarObjectKey = "envoys/envoy-1/avatar.webp",
+            },
+        });
+        var relay = new RelayHttpClient(new HttpClient(handler), _ =>
+            Task.FromResult<(Uri, string?)>((new Uri("https://relay.example"), null)));
+
+        var exchange = await relay.ExchangeAsync("exchange-code");
+
+        Assert.Equal("Laurent", exchange.PublicName);
+        Assert.Equal("Nova · Laurent", exchange.PersonaName);
+    }
+
+    [Fact]
+    public async Task Relay_profile_error_is_preserved_for_the_settings_caller()
+    {
+        var handler = new StaticJsonHandler(HttpStatusCode.Conflict, new
+            { error = "public_name_reserved", message = "That name belongs to a Discord member." });
+        var relay = new RelayHttpClient(new HttpClient(handler), _ =>
+            Task.FromResult<(Uri, string?)>((new Uri("https://relay.example"), "envoy.secret")));
+
+        var error = await Assert.ThrowsAsync<RelayApiException>(() =>
+            relay.UpdateProfileAsync("Reserved", new Dictionary<string, bool>()));
+
+        Assert.Equal("public_name_reserved", error.Reason);
+        Assert.Equal("That name belongs to a Discord member.", error.Message);
+        Assert.Equal(409, error.StatusCode);
     }
 
     private static ClaimsPrincipal Principal(string executionIdentity) => new(new ClaimsIdentity([new Claim("token_use", "execution"), new Claim("execution_identity", executionIdentity)], "test"));
@@ -155,4 +195,11 @@ internal sealed class CaptureHttpHandler : HttpMessageHandler
         Body = await request.Content!.ReadAsStringAsync(cancellationToken); AuthorizationScheme = request.Headers.Authorization?.Scheme; AuthorizationParameter = request.Headers.Authorization?.Parameter;
         return new(HttpStatusCode.OK) { Content = JsonContent.Create(new { envoy = new { } }) };
     }
+}
+
+internal sealed class StaticJsonHandler(HttpStatusCode status, object payload) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken) =>
+        Task.FromResult(new HttpResponseMessage(status) { Content = JsonContent.Create(payload) });
 }

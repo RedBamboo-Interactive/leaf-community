@@ -1,6 +1,6 @@
 {
   "id": "leaf-commons",
-  "name": "Nova Commons",
+  "name": "Public Nova",
   "version": "0.1.0",
   "kernelApi": "^0.1.0",
   "description": "A private, owner-gated Envoy for the Nova Commons relay.",
@@ -15,26 +15,12 @@
       "slot": "context-contributor",
       "contract": "leaf.context-fragment/1",
       "order": 60,
-      "description": "Contributes a bounded owner-scoped summary of unread quoted Commons digests"
+      "description": "Contributes a bounded owner-scoped summary of unread quoted Public Nova digests"
     }]
   },
   "frontend": {
     "package": "leaf-commons-web",
-    "settings": {},
-    "extensions": [{
-      "id": "commons",
-      "target": "nova",
-      "slot": "app-section",
-      "order": 3,
-      "description": "Envoy connection, shareable set, digests, and brief delivery history",
-      "section": {
-        "name": "Commons",
-        "icon": "ph-bold ph-leaf",
-        "path": "commons",
-        "description": "Manage the Nova Commons Envoy",
-        "legacyRoute": "/apps/leaf-commons"
-      }
-    }]
+    "settings": {}
   },
   "permissions": [
     { "kind": "net", "target": "127.0.0.1", "reason": "Owner-configured local relay and RedLeaf/RedCompute loopback APIs" }

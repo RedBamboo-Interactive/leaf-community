@@ -386,13 +386,27 @@ A successful post completes the run. Post at most one answer.
                 if (!addressDecision.Allowed) { decision = addressDecision; break; }
             }
         await audit.RecordAsync("filter_decision", new Dictionary<string, object?>
-            { ["allowed"] = decision.Allowed, ["rule"] = decision.Rule, ["alarm"] = decision.Alarm }, ct);
+        {
+            ["thread"] = request.ThreadRef,
+            ["scenario"] = request.Kind,
+            ["delivery"] = keySuffix,
+            ["allowed"] = decision.Allowed,
+            ["rule"] = decision.Rule,
+            ["alarm"] = decision.Alarm,
+        }, ct);
         if (!decision.Allowed) return new(decision, null);
 
         var posted = await relay.PostAsync(request.ThreadRef!, content, addresses,
             StableKey(request, step) + "-" + keySuffix, ct);
         await audit.RecordAsync("relay_post", new Dictionary<string, object?>
-            { ["accepted"] = posted.Accepted, ["code"] = posted.Code, ["messageId"] = posted.MessageId }, ct);
+        {
+            ["thread"] = request.ThreadRef,
+            ["scenario"] = request.Kind,
+            ["delivery"] = keySuffix,
+            ["accepted"] = posted.Accepted,
+            ["code"] = posted.Code,
+            ["messageId"] = posted.MessageId,
+        }, ct);
         return new(decision, posted);
     }
 
@@ -458,7 +472,12 @@ A successful post completes the run. Post at most one answer.
 
     private static Dictionary<string, object?> TerminalMetadata(EnvoyRunRequest request, int steps, string? reason = null)
     {
-        var metadata = new Dictionary<string, object?> { ["thread"] = request.ThreadRef, ["steps"] = steps };
+        var metadata = new Dictionary<string, object?>
+        {
+            ["thread"] = request.ThreadRef,
+            ["scenario"] = request.Kind,
+            ["steps"] = steps,
+        };
         if (reason is not null) metadata["reason"] = reason;
         return metadata;
     }

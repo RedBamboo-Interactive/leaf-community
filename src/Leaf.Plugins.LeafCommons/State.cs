@@ -16,12 +16,17 @@ public sealed record CommonsSettings(
     string? OwnerUserId = null, string? AgentEntityId = null,
     string AvatarSource = AvatarSources.AgentAvatar, string? AvatarContentHash = null,
     string AvatarSyncStatus = "not-synced", string? AvatarSyncReason = null,
-    string? AvatarResolvedAssetId = null, DateTimeOffset? AvatarSyncedAt = null)
+    string? AvatarResolvedAssetId = null, DateTimeOffset? AvatarSyncedAt = null,
+    string? PublicName = null, string? EnvoyId = null)
 {
+    public string EffectivePublicName => !string.IsNullOrWhiteSpace(PublicName)
+        ? PublicName
+        : PublicNameFromPersona(Persona);
+
     public object Public(bool outfitsAvailable = false) => new
     {
         relayBaseUrl = RelayBaseUrl, credentialConfigured = !string.IsNullOrWhiteSpace(Credential),
-        connectionStatus = ConnectionStatus, persona = Persona, avatar = Avatar,
+        connectionStatus = ConnectionStatus, publicName = EffectivePublicName, persona = Persona, avatar = Avatar,
         avatarSource = AvatarSource, outfitsAvailable,
         avatarSyncStatus = AvatarSyncStatus, avatarSyncReason = AvatarSyncReason,
         avatarResolvedAssetId = AvatarResolvedAssetId, avatarSyncedAt = AvatarSyncedAt,
@@ -29,6 +34,14 @@ public sealed record CommonsSettings(
         personalWords = PersonalWords, canaries = Canaries, novaDiscussionId = NovaDiscussionId,
         linkAllowlist = LinkAllowlist, ownerUserId = OwnerUserId, agentEntityId = AgentEntityId
     };
+
+    public static string PublicNameFromPersona(string? persona)
+    {
+        var value = persona?.Trim() ?? "";
+        return value.StartsWith("Nova · ", StringComparison.OrdinalIgnoreCase)
+            ? value[7..].Trim()
+            : value;
+    }
 }
 
 public sealed record StoredDigest(
@@ -38,6 +51,9 @@ public sealed record StoredDigest(
 public sealed record StoredBrief(
     Guid Id, string Kind, string? Title, string ContentHash, string Outcome,
     string? MessageId, string? Reason, DateTimeOffset CreatedAt);
+
+public sealed record StoredAudit(
+    Guid Id, string Event, JsonObject Metadata, DateTimeOffset CreatedAt);
 
 public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
 {
@@ -122,6 +138,23 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
             .ToArray();
     }
 
+    public async Task<IReadOnlyList<StoredDigest>> ListDigestsForThreadAsync(
+        string threadRef, CancellationToken ct = default)
+    {
+        var all = await ListDigestsAsync(ct: ct);
+        return all.Where(item => string.Equals(item.ThreadRef, threadRef, StringComparison.Ordinal)).ToArray();
+    }
+
+    public async Task<IReadOnlyList<StoredAudit>> ListAuditsAsync(CancellationToken ct = default)
+    {
+        var found = await entities.QueryAsync(new EntityQuery
+            { TypeSlug = "leaf-commons-audit", Limit = 500 }, ct);
+        return found.Select(ToAudit)
+            .OrderByDescending(item => item.CreatedAt)
+            .ThenByDescending(item => item.Id)
+            .ToArray();
+    }
+
     public async Task<StoredDigest> MarkDigestReadAsync(Guid id, CancellationToken ct = default)
     {
         var entity = await entities.GetAsync(id, ct) ?? throw new KeyNotFoundException("Digest not found");
@@ -179,7 +212,8 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
             S(d, "nova_discussion_id"), List(d["link_allowlist"]), S(d, "owner_user_id"), S(d, "agent_entity_id"),
             S(d, "avatar_source") is { } source && AvatarSources.IsValid(source) ? source : AvatarSources.AgentAvatar,
             S(d, "avatar_content_hash"), S(d, "avatar_sync_status") ?? "not-synced",
-            S(d, "avatar_sync_reason"), S(d, "avatar_resolved_asset_id"), Date(d, "avatar_synced_at"));
+            S(d, "avatar_sync_reason"), S(d, "avatar_resolved_asset_id"), Date(d, "avatar_synced_at"),
+            S(d, "public_name") ?? CommonsSettings.PublicNameFromPersona(S(d, "persona")), S(d, "envoy_id"));
     }
     private static JsonObject ToData(CommonsSettings x) => new()
     {
@@ -191,7 +225,8 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         ["avatar_source"] = x.AvatarSource, ["avatar_content_hash"] = x.AvatarContentHash,
         ["avatar_sync_status"] = x.AvatarSyncStatus, ["avatar_sync_reason"] = x.AvatarSyncReason,
         ["avatar_resolved_asset_id"] = x.AvatarResolvedAssetId,
-        ["avatar_synced_at"] = x.AvatarSyncedAt?.ToString("O")
+        ["avatar_synced_at"] = x.AvatarSyncedAt?.ToString("O"),
+        ["public_name"] = x.PublicName, ["envoy_id"] = x.EnvoyId
     };
     private static string? S(JsonObject d, string key) => d[key]?.GetValue<string>();
     private static DateTimeOffset? Date(JsonObject d, string key)
@@ -221,6 +256,19 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         return new(entity.Id, S(entity.Data, "kind") ?? "unknown", S(entity.Data, "title"),
             S(entity.Data, "content_hash") ?? ContentHash(legacyContent ?? ""), outcome,
             S(entity.Data, "message_id"), reason, createdAt);
+    }
+
+    private static StoredAudit ToAudit(LeafEntity entity)
+    {
+        var occurredAt = entity.Data["occurred_at"] switch
+        {
+            JsonValue value when value.TryGetValue<DateTimeOffset>(out var direct) => direct,
+            JsonValue value when value.TryGetValue<string>(out var text)
+                && DateTimeOffset.TryParse(text, out var parsed) => parsed,
+            _ => entity.CreatedAt,
+        };
+        return new(entity.Id, S(entity.Data, "event") ?? entity.Name,
+            entity.Data["metadata"] as JsonObject ?? [], occurredAt);
     }
 
     public static string ContentHash(string content) =>
