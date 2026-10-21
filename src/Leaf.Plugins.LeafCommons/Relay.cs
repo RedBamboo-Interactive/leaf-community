@@ -159,21 +159,38 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
 
     public async Task<IReadOnlyList<RelayThreadSummary>> GetThreadsAsync(CancellationToken ct = default)
     {
-        using var response = await SendAsync(HttpMethod.Get, "/v1/threads?limit=100", null, ct);
-        if (response.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.NotImplemented)
-            throw new RelayFeatureUnavailableException("threads");
-        using var json = await ReadJsonAsync(response, ct);
-        if (!response.IsSuccessStatusCode) throw RelayError(response, json.RootElement, "threads_failed");
-        var items = json.RootElement.TryGetProperty("items", out var list) ? list : default;
-        if (items.ValueKind != JsonValueKind.Array) return [];
-        return items.EnumerateArray().Select(item => new RelayThreadSummary(
-            item.GetProperty("threadRef").GetString() ?? "",
-            String(item, "channelName") ?? String(item, "channel") ?? "",
-            String(item, "title") ?? "",
-            Time(item, "lastActivityAt"),
-            String(item, "lastSnippet") ?? "",
-            Boolean(item, "unread") ?? (Integer(item, "unreadPings") ?? 0) > 0,
-            String(item, "scenario"))).Where(item => item.ThreadRef.Length > 0).ToArray();
+        var result = new List<RelayThreadSummary>();
+        string? cursor = null;
+        var seenCursors = new HashSet<string>(StringComparer.Ordinal);
+        do
+        {
+            var path = "/v1/threads?limit=100" + (cursor is null
+                ? ""
+                : "&cursor=" + Uri.EscapeDataString(cursor));
+            using var response = await SendAsync(HttpMethod.Get, path, null, ct);
+            if (response.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.NotImplemented)
+                throw new RelayFeatureUnavailableException("threads");
+            using var json = await ReadJsonAsync(response, ct);
+            if (!response.IsSuccessStatusCode) throw RelayError(response, json.RootElement, "threads_failed");
+            if (json.RootElement.TryGetProperty("items", out var items)
+                && items.ValueKind == JsonValueKind.Array)
+            {
+                result.AddRange(items.EnumerateArray().Select(item => new RelayThreadSummary(
+                    item.GetProperty("threadRef").GetString() ?? "",
+                    String(item, "channelName") ?? String(item, "channel") ?? "",
+                    String(item, "title") ?? "",
+                    Time(item, "lastActivityAt"),
+                    String(item, "lastSnippet") ?? "",
+                    Boolean(item, "unread") ?? (Integer(item, "unreadPings") ?? 0) > 0,
+                    String(item, "scenario"))).Where(item => item.ThreadRef.Length > 0));
+            }
+            cursor = String(json.RootElement, "nextCursor");
+            if (result.Count > 10_000)
+                throw new RelayApiException("threads_too_many", "The relay returned too many threads.", 502);
+            if (!string.IsNullOrWhiteSpace(cursor) && !seenCursors.Add(cursor))
+                throw new RelayApiException("threads_cursor_loop", "The relay repeated a thread cursor.", 502);
+        } while (!string.IsNullOrWhiteSpace(cursor));
+        return result;
     }
 
     public async Task<IReadOnlyList<RelayThreadMessage>> GetThreadMessagesAsync(

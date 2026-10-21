@@ -133,7 +133,10 @@ public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore s
         foreach (var audit in audits)
         {
             var thread = String(audit.Metadata, "thread");
-            if (string.IsNullOrWhiteSpace(thread)) continue;
+            // Early listening-event builds incorrectly substituted the read-only channel name
+            // for a missing Discord thread reference. Those audit rows are not threads.
+            if (string.IsNullOrWhiteSpace(thread)
+                || string.Equals(thread, "announcements", StringComparison.OrdinalIgnoreCase)) continue;
             var scenario = String(audit.Metadata, "scenario");
             var agentEntityId = String(audit.Metadata, "agent_entity_id");
             switch (audit.Event)
@@ -166,7 +169,22 @@ public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore s
     }
 
     private static string OutcomeSnippet(string outcome, string? reason)
-        => string.IsNullOrWhiteSpace(reason) ? outcome : $"{outcome}: {reason}";
+        => reason switch
+        {
+            "absolute-path" => "Withheld: it contained a file path",
+            "relay_link_not_allowed" => "Withheld: it contained a link that isn't allowed",
+            "scenario_disabled" => "Withheld: this scenario is disabled",
+            "wait_for_human" => "Paused until a human replies",
+            "step_limit" or "repeated_action" or "invalid_model_action"
+                => "Couldn't answer from the shared material",
+            "thread_history_failed" => "Couldn't load the conversation",
+            "gateway_forbidden" or "gateway_unavailable" or "tool_free_unavailable"
+                => "Couldn't answer right now",
+            _ when string.Equals(outcome, "posted", StringComparison.Ordinal) => "Posted",
+            _ when string.Equals(outcome, "fallback", StringComparison.Ordinal) => "Posted a safe fallback",
+            _ when string.Equals(outcome, "failed", StringComparison.Ordinal) => "Couldn't answer",
+            _ => "Withheld",
+        };
 
     private static string? String(JsonObject data, string key)
         => data[key] is JsonValue value && value.TryGetValue<string>(out var result) ? result : null;

@@ -76,6 +76,69 @@ public sealed class ThreadsTests
         Assert.Equal("failed", message.Outcome);
         Assert.Equal("", message.Text);
     }
+
+    [Fact]
+    public async Task Local_outcomes_are_humanized_and_stale_announcement_rows_are_not_threads()
+    {
+        var relay = new RelayHttpClient(new HttpClient(new ThreadRelayHandler(threadsAvailable: false)), _ =>
+            Task.FromResult<(Uri, string?)>((new Uri("https://relay.example"), "envoy.secret")));
+        var state = new CommonsStateStore(new MemoryEntityStore());
+        var settings = await state.SaveSettingsAsync(new(null, "https://relay.example", "envoy.secret", "active",
+            "Nova · Laurent", null, new Dictionary<string, bool>(), [], [], [], null, [], "owner-1", "agent-1"));
+        await state.RecordAsync("envoy_failed", new Dictionary<string, object?>
+        {
+            ["thread"] = "announcements", ["reason"] = "thread_history_failed",
+        });
+        await state.RecordAsync("envoy_blocked", new Dictionary<string, object?>
+        {
+            ["thread"] = "thread-path", ["reason"] = "absolute-path",
+        });
+
+        var item = Assert.Single(await new PublicNovaThreads(relay, state).ListAsync(settings));
+        Assert.Equal("thread-path", item.ThreadRef);
+        Assert.Equal("Withheld: it contained a file path", item.LastSnippet);
+    }
+
+    [Fact]
+    public async Task Relay_thread_list_follows_all_pages()
+    {
+        var handler = new PaginatedThreadRelayHandler();
+        var relay = new RelayHttpClient(new HttpClient(handler), _ =>
+            Task.FromResult<(Uri, string?)>((new Uri("https://relay.example"), "envoy.secret")));
+
+        var items = await relay.GetThreadsAsync();
+
+        Assert.Equal(["thread-1", "thread-2"], items.Select(item => item.ThreadRef));
+        Assert.Equal(2, handler.Calls);
+    }
+}
+
+internal sealed class PaginatedThreadRelayHandler : HttpMessageHandler
+{
+    public int Calls { get; private set; }
+
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Calls++;
+        var second = request.RequestUri!.Query.Contains("cursor=next", StringComparison.Ordinal);
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = JsonContent.Create(new
+            {
+                items = new[]
+                {
+                    new
+                    {
+                        threadRef = second ? "thread-2" : "thread-1", channel = "engineering",
+                        title = second ? "Second" : "First", lastActivityAt = 1792227600000L,
+                        lastSnippet = "A real message",
+                    },
+                },
+                nextCursor = second ? null : "next",
+            }),
+        });
+    }
 }
 
 internal sealed class ThreadRelayHandler(bool threadsAvailable = true) : HttpMessageHandler
