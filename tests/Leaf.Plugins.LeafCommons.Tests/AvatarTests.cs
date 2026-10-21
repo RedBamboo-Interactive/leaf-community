@@ -105,29 +105,65 @@ public sealed class AvatarTests
     }
 
     [Fact]
-    public async Task Resolver_uses_enabled_plugin_status_and_outfits_canonical_agent_reference()
+    public async Task Resolver_uses_the_exact_live_outfits_contract_shape_and_never_falls_back()
     {
         var entities = new MemoryEntityStore();
         var enabled = await entities.UpsertBySlugAsync("plugin-status", "enabled", "Enabled");
         await entities.UpsertBySlugAsync("plugin", "outfits", "Outfits",
             new JsonObject { ["status"] = enabled.Id.ToString() });
-        var agent = await entities.UpsertBySlugAsync("agent", "nova", "Nova",
-            new JsonObject { ["avatar"] = "/api/assets/base.png" });
-        var outfit = await entities.CreateAsync("outfit", "Red jacket",
-            new JsonObject { ["agent"] = agent.Id.ToString(), ["asset"] = "/api/assets/outfit.webp" });
-        await entities.PatchAsync(agent.Id, new JsonObject { ["outfit"] = outfit.Id.ToString() });
+        var agentId = Guid.Parse("a7b059ac-f678-8b58-819b-1bcf3acb22db");
+        var outfitId = Guid.Parse("d0da69ca-8d2a-4a6d-8110-1e77fe7bf2dc");
+        var agent = entities.Seed(agentId, "agent", "Nova", "nova", new JsonObject
+        {
+            ["avatar"] = "/api/assets/c70791db-dd7f-4ed1-beab-6ac2f891af50.png",
+            ["outfit"] = outfitId.ToString(),
+        });
+        entities.Seed(outfitId, "outfit", "Wednesday emerald velvet, rain seat", "wednesday-emerald", new JsonObject
+        {
+            ["agent"] = agent.Id.ToString(),
+            ["asset"] = "/api/assets/8b4771d3-16e6-4371-9ae9-5812439bc8df.png",
+        });
+        var baseImage = Image(SKColors.White);
+        var outfitImage = Image(SKColors.Green);
         var assets = new FakeAssets(new Dictionary<string, AssetFile>
         {
-            ["base.png"] = new(Image(SKColors.Blue).Bytes, "image/png"),
-            ["outfit.webp"] = new(Image(SKColors.Red).Bytes, "image/webp"),
+            ["c70791db-dd7f-4ed1-beab-6ac2f891af50.png"] = new(baseImage.Bytes, "image/png"),
+            ["8b4771d3-16e6-4371-9ae9-5812439bc8df.png"] = new(outfitImage.Bytes, "image/png"),
         });
         var resolver = new RedLeafAvatarImageSource(entities, assets);
 
         Assert.True(await resolver.IsOutfitsAvailableAsync());
-        Assert.Equal("image/png", (await resolver.ResolveAsync(AvatarSources.AgentAvatar, agent.Id.ToString())).ContentType);
-        Assert.Equal("image/webp", (await resolver.ResolveAsync(AvatarSources.Outfit, agent.Id.ToString())).ContentType);
+        var resolved = await resolver.ResolveAsync(AvatarSources.Outfit, agent.Id.ToString());
+        Assert.Equal(outfitImage.Bytes, resolved.Bytes);
+        Assert.Equal("8b4771d3-16e6-4371-9ae9-5812439bc8df.png", resolved.AssetId);
+        Assert.Equal(outfitId.ToString(), resolved.SourceReference);
         await entities.PatchAsync(agent.Id, new JsonObject { ["outfit"] = "" });
-        Assert.Equal("image/png", (await resolver.ResolveAsync(AvatarSources.Outfit, agent.Id.ToString())).ContentType);
+        var failure = await Assert.ThrowsAsync<AvatarSyncException>(
+            () => resolver.ResolveAsync(AvatarSources.Outfit, agent.Id.ToString()));
+        Assert.Equal("outfit_not_selected", failure.Reason);
+    }
+
+    [Fact]
+    public async Task Outfit_resolution_failure_is_audited_and_exposed_in_settings()
+    {
+        var entities = new MemoryEntityStore();
+        var store = await SettingsAsync(entities);
+        await store.SaveSettingsAsync((await store.GetSettingsAsync()) with
+            { AvatarSource = AvatarSources.Outfit, AvatarContentHash = null });
+        var audit = new MemoryAudit();
+        var service = new AvatarSyncService(store,
+            new ThrowingAvatarImageSource("outfit_not_selected"), new AvatarImageProcessor(),
+            new CapturingAvatarUploader(), new NullPluginEvents(), audit);
+
+        var failure = await Assert.ThrowsAsync<AvatarSyncException>(() => service.SyncAsync());
+
+        Assert.Equal("outfit_not_selected", failure.Reason);
+        var settings = await store.GetSettingsAsync();
+        Assert.Equal("failed", settings.AvatarSyncStatus);
+        Assert.Equal("outfit_not_selected", settings.AvatarSyncReason);
+        Assert.Contains(audit.Events, item => item.Name == "avatar_sync_failed"
+            && Equals(item.Data["reason"], "outfit_not_selected")
+            && Equals(item.Data["source"], AvatarSources.Outfit));
     }
 
     private static AvatarImage Image(SKColor color, int width = 640, int height = 640)
@@ -158,6 +194,13 @@ internal sealed class FakeAvatarImageSource(bool outfitsAvailable, AvatarImage a
     public Task<bool> IsOutfitsAvailableAsync(CancellationToken ct = default) => Task.FromResult(outfitsAvailable);
     public Task<AvatarImage> ResolveAsync(string source, string agentEntityId, CancellationToken ct = default)
         => Task.FromResult(source == AvatarSources.Outfit ? Outfit : Agent);
+}
+
+internal sealed class ThrowingAvatarImageSource(string reason) : IAvatarImageSource
+{
+    public Task<bool> IsOutfitsAvailableAsync(CancellationToken ct = default) => Task.FromResult(true);
+    public Task<AvatarImage> ResolveAsync(string source, string agentEntityId, CancellationToken ct = default)
+        => Task.FromException<AvatarImage>(new AvatarSyncException(reason));
 }
 
 internal sealed class CapturingAvatarUploader : IAvatarUploader

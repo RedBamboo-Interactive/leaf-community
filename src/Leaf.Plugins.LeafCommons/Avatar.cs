@@ -28,7 +28,11 @@ public sealed class AvatarSyncException(string reason) : Exception(reason)
     public string Reason { get; } = reason;
 }
 
-public sealed record AvatarImage(byte[] Bytes, string ContentType);
+public sealed record AvatarImage(
+    byte[] Bytes,
+    string ContentType,
+    string? AssetId = null,
+    string? SourceReference = null);
 public sealed record PreparedAvatar(byte[] Bytes, string ContentType, string ContentHash);
 public sealed record AvatarUploadResult(string AvatarKey, string AvatarUrl, string ContentHash, bool Changed);
 public sealed record AvatarSyncResult(bool Uploaded, string ContentHash, string? AvatarUrl = null);
@@ -63,32 +67,31 @@ public sealed class RedLeafAvatarImageSource(IEntityStore entities, IAssets asse
         if (source == AvatarSources.Outfit)
         {
             if (!await IsOutfitsAvailableAsync(ct)) throw new AvatarSyncException("outfit_unavailable");
+            // Match the Outfits read contract: the Agent's `outfit` field is the
+            // current override, and that outfit entity's `asset` is the image.
             var outfitId = String(agent.Data, "outfit");
-            if (string.IsNullOrWhiteSpace(outfitId))
-            {
-                assetValue = AvatarValue(agent.Data);
-            }
-            else
-            {
-                if (!Guid.TryParse(outfitId, out var parsed)) throw new AvatarSyncException("outfit_not_found");
-                var outfit = await entities.GetAsync(parsed, ct);
-                if (outfit?.TypeSlug != "outfit") throw new AvatarSyncException("outfit_not_found");
-                var owner = String(outfit.Data, "agent");
-                if (!string.IsNullOrWhiteSpace(owner) && owner != agent.Id.ToString())
-                    throw new AvatarSyncException("outfit_agent_mismatch");
-                assetValue = String(outfit.Data, "asset");
-            }
+            if (string.IsNullOrWhiteSpace(outfitId)) throw new AvatarSyncException("outfit_not_selected");
+            if (!Guid.TryParse(outfitId, out var parsed)) throw new AvatarSyncException("outfit_not_found");
+            var outfit = await entities.GetAsync(parsed, ct);
+            if (outfit?.TypeSlug != "outfit") throw new AvatarSyncException("outfit_not_found");
+            var owner = String(outfit.Data, "agent");
+            if (!string.Equals(owner, agent.Id.ToString(), StringComparison.OrdinalIgnoreCase))
+                throw new AvatarSyncException("outfit_agent_mismatch");
+            assetValue = String(outfit.Data, "asset");
+            if (string.IsNullOrWhiteSpace(assetValue)) throw new AvatarSyncException("outfit_asset_missing");
+            return await ReadAssetAsync(assetValue, outfit.Id.ToString(), ct);
         }
-        else
-        {
-            assetValue = AvatarValue(agent.Data);
-        }
+        assetValue = AvatarValue(agent.Data);
+        return await ReadAssetAsync(assetValue, agent.Id.ToString(), ct);
+    }
 
+    private async Task<AvatarImage> ReadAssetAsync(string? assetValue, string sourceReference, CancellationToken ct)
+    {
         var assetId = AssetId(assetValue) ?? throw new AvatarSyncException("avatar_asset_not_local");
         var file = await assets.ReadAsync(assetId, ct) ?? throw new AvatarSyncException("avatar_asset_not_found");
         if (!file.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
             throw new AvatarSyncException("avatar_asset_not_image");
-        return new(file.Bytes, file.ContentType);
+        return new(file.Bytes, file.ContentType, assetId, sourceReference);
     }
 
     private async Task<LeafEntity?> ResolveAgentAsync(string value, CancellationToken ct)
@@ -182,15 +185,19 @@ public sealed class AvatarSyncService(
     public async Task<AvatarSyncResult> SyncAsync(CommonsSettings? requested = null, CancellationToken ct = default)
     {
         await gate.WaitAsync(ct);
+        CommonsSettings? settings = null;
         try
         {
-            var settings = requested ?? await store.GetSettingsAsync(ct);
+            settings = requested ?? await store.GetSettingsAsync(ct);
             if (string.IsNullOrWhiteSpace(settings.Credential)) throw new AvatarSyncException("envoy_credential_missing");
             if (string.IsNullOrWhiteSpace(settings.AgentEntityId)) throw new AvatarSyncException("agent_not_configured");
             var image = await source.ResolveAsync(settings.AvatarSource, settings.AgentEntityId, ct);
             var prepared = processor.Prepare(image);
             if (string.Equals(prepared.ContentHash, settings.AvatarContentHash, StringComparison.Ordinal))
+            {
+                await SaveOutcomeAsync(settings, "current", null, image.AssetId, ct);
                 return new(false, prepared.ContentHash);
+            }
             var uploaded = await uploader.UploadAvatarAsync(prepared.Bytes, prepared.ContentType, ct);
             if (!string.Equals(uploaded.ContentHash, prepared.ContentHash, StringComparison.Ordinal))
                 throw new AvatarSyncException("relay_avatar_hash_mismatch");
@@ -198,14 +205,31 @@ public sealed class AvatarSyncService(
             {
                 Avatar = uploaded.AvatarKey,
                 AvatarContentHash = prepared.ContentHash,
+                AvatarSyncStatus = "synced",
+                AvatarSyncReason = null,
+                AvatarResolvedAssetId = image.AssetId,
+                AvatarSyncedAt = DateTimeOffset.UtcNow,
             }, ct);
             await audit.RecordAsync("avatar_synced", new Dictionary<string, object?>
             {
                 ["source"] = settings.AvatarSource,
+                ["agent_entity_id"] = settings.AgentEntityId,
+                ["source_reference"] = image.SourceReference,
+                ["asset_id"] = image.AssetId,
                 ["content_hash"] = prepared.ContentHash,
                 ["changed"] = uploaded.Changed,
             }, ct);
             return new(true, prepared.ContentHash, uploaded.AvatarUrl);
+        }
+        catch (AvatarSyncException error)
+        {
+            await RecordFailureAsync(settings, error.Reason);
+            throw;
+        }
+        catch (Exception) when (!ct.IsCancellationRequested)
+        {
+            await RecordFailureAsync(settings, "unexpected_error");
+            throw;
         }
         finally { gate.Release(); }
     }
@@ -227,13 +251,40 @@ public sealed class AvatarSyncService(
     {
         try { await SyncAsync(ct: ct); }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
-        catch (AvatarSyncException error)
+        catch { }
+    }
+
+    private async Task SaveOutcomeAsync(
+        CommonsSettings settings, string status, string? reason, string? assetId, CancellationToken ct)
+    {
+        await store.SaveSettingsAsync(settings with
         {
-            await audit.RecordAsync("avatar_sync_failed", new Dictionary<string, object?> { ["reason"] = error.Reason }, CancellationToken.None);
+            AvatarSyncStatus = status,
+            AvatarSyncReason = reason,
+            AvatarResolvedAssetId = assetId,
+            AvatarSyncedAt = DateTimeOffset.UtcNow,
+        }, ct);
+    }
+
+    private async Task RecordFailureAsync(CommonsSettings? settings, string reason)
+    {
+        if (settings is not null)
+        {
+            try { await SaveOutcomeAsync(settings, "failed", reason, null, CancellationToken.None); }
+            catch { /* The audit remains mandatory even if status persistence fails. */ }
+        }
+        try
+        {
+            await audit.RecordAsync("avatar_sync_failed", new Dictionary<string, object?>
+            {
+                ["source"] = settings?.AvatarSource,
+                ["agent_entity_id"] = settings?.AgentEntityId,
+                ["reason"] = reason,
+            }, CancellationToken.None);
         }
         catch
         {
-            await audit.RecordAsync("avatar_sync_failed", new Dictionary<string, object?> { ["reason"] = "unexpected_error" }, CancellationToken.None);
+            // Do not replace the resolution exception with a secondary audit-write failure.
         }
     }
 

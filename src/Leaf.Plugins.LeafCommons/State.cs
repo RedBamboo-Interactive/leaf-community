@@ -14,13 +14,17 @@ public sealed record CommonsSettings(
     IReadOnlyList<string> ShareableFolders, IReadOnlyList<string> PersonalWords,
     IReadOnlyList<string> Canaries, string? NovaDiscussionId, IReadOnlyList<string> LinkAllowlist,
     string? OwnerUserId = null, string? AgentEntityId = null,
-    string AvatarSource = AvatarSources.AgentAvatar, string? AvatarContentHash = null)
+    string AvatarSource = AvatarSources.AgentAvatar, string? AvatarContentHash = null,
+    string AvatarSyncStatus = "not-synced", string? AvatarSyncReason = null,
+    string? AvatarResolvedAssetId = null, DateTimeOffset? AvatarSyncedAt = null)
 {
     public object Public(bool outfitsAvailable = false) => new
     {
         relayBaseUrl = RelayBaseUrl, credentialConfigured = !string.IsNullOrWhiteSpace(Credential),
         connectionStatus = ConnectionStatus, persona = Persona, avatar = Avatar,
         avatarSource = AvatarSource, outfitsAvailable,
+        avatarSyncStatus = AvatarSyncStatus, avatarSyncReason = AvatarSyncReason,
+        avatarResolvedAssetId = AvatarResolvedAssetId, avatarSyncedAt = AvatarSyncedAt,
         scenarioToggles = ScenarioToggles, shareableFolders = ShareableFolders,
         personalWords = PersonalWords, canaries = Canaries, novaDiscussionId = NovaDiscussionId,
         linkAllowlist = LinkAllowlist, ownerUserId = OwnerUserId, agentEntityId = AgentEntityId
@@ -174,7 +178,8 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
             S(d, "persona") ?? "Nova", S(d, "avatar"), Dict(d["scenario_toggles"]), List(d["shareable_folders"]), List(d["personal_words"]), List(d["canaries"]),
             S(d, "nova_discussion_id"), List(d["link_allowlist"]), S(d, "owner_user_id"), S(d, "agent_entity_id"),
             S(d, "avatar_source") is { } source && AvatarSources.IsValid(source) ? source : AvatarSources.AgentAvatar,
-            S(d, "avatar_content_hash"));
+            S(d, "avatar_content_hash"), S(d, "avatar_sync_status") ?? "not-synced",
+            S(d, "avatar_sync_reason"), S(d, "avatar_resolved_asset_id"), Date(d, "avatar_synced_at"));
     }
     private static JsonObject ToData(CommonsSettings x) => new()
     {
@@ -183,9 +188,14 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         ["shareable_folders"] = JsonSerializer.SerializeToNode(x.ShareableFolders), ["personal_words"] = JsonSerializer.SerializeToNode(x.PersonalWords),
         ["canaries"] = JsonSerializer.SerializeToNode(x.Canaries), ["nova_discussion_id"] = x.NovaDiscussionId,
         ["link_allowlist"] = JsonSerializer.SerializeToNode(x.LinkAllowlist), ["owner_user_id"] = x.OwnerUserId, ["agent_entity_id"] = x.AgentEntityId,
-        ["avatar_source"] = x.AvatarSource, ["avatar_content_hash"] = x.AvatarContentHash
+        ["avatar_source"] = x.AvatarSource, ["avatar_content_hash"] = x.AvatarContentHash,
+        ["avatar_sync_status"] = x.AvatarSyncStatus, ["avatar_sync_reason"] = x.AvatarSyncReason,
+        ["avatar_resolved_asset_id"] = x.AvatarResolvedAssetId,
+        ["avatar_synced_at"] = x.AvatarSyncedAt?.ToString("O")
     };
     private static string? S(JsonObject d, string key) => d[key]?.GetValue<string>();
+    private static DateTimeOffset? Date(JsonObject d, string key)
+        => DateTimeOffset.TryParse(S(d, key), out var value) ? value : null;
     private static IReadOnlyList<string> List(JsonNode? n) => n is JsonArray a ? a.Select(x => x?.GetValue<string>()).Where(x => x is not null).Cast<string>().ToArray() : [];
     private static IReadOnlyDictionary<string, bool> Dict(JsonNode? n) => n is JsonObject o ? o.ToDictionary(x => x.Key, x => x.Value?.GetValue<bool>() ?? false) : new Dictionary<string, bool>();
     private static StoredDigest ToDigest(LeafEntity entity)

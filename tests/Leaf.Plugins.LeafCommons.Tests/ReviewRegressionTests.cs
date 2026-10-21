@@ -275,6 +275,13 @@ internal sealed class MemoryEntityStore : IEntityStore
     private long revision;
 
     public Task<LeafEntity?> GetAsync(Guid id, CancellationToken ct = default) => Task.FromResult(byId.GetValueOrDefault(id));
+
+    public LeafEntity Seed(Guid id, string typeSlug, string name, string slug, JsonObject data)
+    {
+        var entity = New(id, typeSlug, slug, name, data);
+        byId[id] = entity;
+        return entity;
+    }
     public Task<LeafEntity?> GetBySlugAsync(string slug, CancellationToken ct = default) => Task.FromResult(byId.Values.FirstOrDefault(x => x.Slug == slug));
     public Task<LeafEntity?> GetBySlugAsync(string typeSlug, string slug, CancellationToken ct = default) => Task.FromResult(byId.Values.FirstOrDefault(x => x.TypeSlug == typeSlug && x.Slug == slug));
     public Task<IReadOnlyList<LeafEntity>> QueryAsync(EntityQuery query, CancellationToken ct = default) =>

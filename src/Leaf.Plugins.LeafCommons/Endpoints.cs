@@ -33,10 +33,19 @@ public static class CommonsEndpoints
             var credential = string.IsNullOrWhiteSpace(update.Credential) ? current.Credential : update.Credential;
             var avatarChanged = current.AvatarSource != update.AvatarSource
                 || !string.Equals(current.AgentEntityId, update.AgentEntityId, StringComparison.OrdinalIgnoreCase);
-            var saved = await store.SaveSettingsAsync(new(current.EntityId, relay.ToString(), credential, current.ConnectionStatus,
-                update.Persona, current.Avatar, update.ScenarioToggles, update.ShareableFolders, update.PersonalWords,
-                update.Canaries, update.NovaDiscussionId, update.LinkAllowlist, ResolveOwnerUserId(auth, current, update.OwnerUserId), update.AgentEntityId,
-                update.AvatarSource, avatarChanged ? null : current.AvatarContentHash), ct);
+            var saved = await store.SaveSettingsAsync(current with
+            {
+                RelayBaseUrl = relay.ToString(), Credential = credential, Persona = update.Persona,
+                ScenarioToggles = update.ScenarioToggles, ShareableFolders = update.ShareableFolders,
+                PersonalWords = update.PersonalWords, Canaries = update.Canaries,
+                NovaDiscussionId = update.NovaDiscussionId, LinkAllowlist = update.LinkAllowlist,
+                OwnerUserId = ResolveOwnerUserId(auth, current, update.OwnerUserId),
+                AgentEntityId = update.AgentEntityId, AvatarSource = update.AvatarSource,
+                AvatarContentHash = avatarChanged ? null : current.AvatarContentHash,
+                AvatarSyncStatus = avatarChanged ? "pending" : current.AvatarSyncStatus,
+                AvatarSyncReason = avatarChanged ? null : current.AvatarSyncReason,
+                AvatarResolvedAssetId = avatarChanged ? null : current.AvatarResolvedAssetId,
+            }, ct);
             if (!string.IsNullOrWhiteSpace(saved.Credential))
             {
                 await relayClient.UpdateProfileAsync(saved.Persona, saved.ScenarioToggles, ct);
@@ -45,6 +54,7 @@ public static class CommonsEndpoints
                 {
                     return Results.Json(new { error = "avatar_sync_failed", reason = error.Reason }, statusCode: 422);
                 }
+                saved = await store.GetSettingsAsync(ct);
             }
             return Results.Ok(saved.Public(await avatars.IsOutfitsAvailableAsync(ct)));
         });

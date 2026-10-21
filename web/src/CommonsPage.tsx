@@ -22,6 +22,10 @@ type Settings = {
   connectionStatus: string
   persona: string
   avatarSource: "agent-avatar" | "outfit"
+  avatarSyncStatus: "not-synced" | "pending" | "current" | "synced" | "failed"
+  avatarSyncReason?: string
+  avatarResolvedAssetId?: string
+  avatarSyncedAt?: string
   outfitsAvailable: boolean
   scenarioToggles: Record<string, boolean>
   shareableFolders: string[]
@@ -140,6 +144,12 @@ export function Page(_props: LeafPluginExtensionProps) {
           </CardHeader>
           <CardContent className="space-y-3">
             <div className="rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground break-all">{settings.relayBaseUrl}</div>
+            <div className={`rounded-lg border px-3 py-2 text-xs ${settings.avatarSyncStatus === "failed" ? "border-destructive-a30 bg-destructive-a10 text-destructive" : "border-border bg-muted text-muted-foreground"}`}>
+              <p className="font-medium text-foreground">Avatar sync · {settings.avatarSyncStatus.replaceAll("-", " ")}</p>
+              {settings.avatarSyncStatus === "failed"
+                ? <p>Could not resolve the selected {settings.avatarSource === "outfit" ? "outfit" : "Agent avatar"}: {settings.avatarSyncReason ?? "unexpected_error"}. The previous relay avatar was left unchanged.</p>
+                : <p>{settings.avatarSource === "outfit" ? "Current outfit" : "Agent avatar"}{settings.avatarSyncedAt ? ` checked ${new Date(settings.avatarSyncedAt).toLocaleString()}` : " has not been checked yet"}.</p>}
+            </div>
             <Button className="w-full sm:w-auto" onClick={() => void connect()}>{active ? "Re-join Commons" : "Connect to Commons"}</Button>
           </CardContent>
         </Card>
