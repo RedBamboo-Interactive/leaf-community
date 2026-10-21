@@ -83,7 +83,7 @@ public static class CommonsEndpoints
             if (IsActive(settings) && rejoin != true) return Results.Conflict(new { error = "active_credential_requires_rejoin" });
             var oauth = await store.CreateOAuthStateAsync(auth.UserId, rejoin == true, ct: ct);
             var callbackWithState = AddQuery(callback, "state", oauth.State);
-            return Results.Ok(new { authorizeUrl = relay.BuildAuthorizeUri(callbackWithState, (scenarios ?? "showcase,consult,open_question,bug").Split(',', StringSplitOptions.RemoveEmptyEntries)) });
+            return Results.Ok(new { authorizeUrl = await relay.BuildAuthorizeUriAsync(callbackWithState, (scenarios ?? "showcase,consult,open_question,bug").Split(',', StringSplitOptions.RemoveEmptyEntries), ct) });
         });
         group.MapGet("/oauth/callback", async (string exchangeCode, string? state, IAuthContext auth, RelayHttpClient relay,
             CommonsStateStore store, AvatarSyncService avatars, CancellationToken ct) =>

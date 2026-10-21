@@ -22,9 +22,19 @@ public sealed class LeafCommonsPlugin : ILeafPlugin
         services.AddSingleton(sp => new CommonsStateStore(sp.GetRequiredKeyedService<IEntityStore>(PluginId)));
         services.AddSingleton<ICommonsAudit>(sp => sp.GetRequiredService<CommonsStateStore>());
         services.AddSingleton<IToolFreeModelClient, ToolFreeModelClient>();
-        services.AddSingleton<Func<(Uri BaseUri, string? Credential)>>(sp => () => { var settings = sp.GetRequiredService<CommonsStateStore>().GetSettingsAsync().GetAwaiter().GetResult(); return (new Uri(settings.RelayBaseUrl), settings.Credential); });
+        // Async on purpose: plugin code can run on the kernel's WPF dispatcher, where blocking on
+        // GetSettingsAsync deadlocks the UI thread (and with it the in-process restart).
+        services.AddSingleton<Func<CancellationToken, Task<(Uri BaseUri, string? Credential)>>>(sp =>
+        {
+            var state = sp.GetRequiredService<CommonsStateStore>();
+            return async ct =>
+            {
+                var current = await state.GetSettingsAsync(ct).ConfigureAwait(false);
+                return (new Uri(current.RelayBaseUrl), current.Credential);
+            };
+        });
         services.AddHttpClient("commons-relay");
-        services.AddSingleton(sp => new RelayHttpClient(sp.GetRequiredService<IHttpClientFactory>().CreateClient("commons-relay"), sp.GetRequiredService<Func<(Uri BaseUri, string? Credential)>>()));
+        services.AddSingleton(sp => new RelayHttpClient(sp.GetRequiredService<IHttpClientFactory>().CreateClient("commons-relay"), sp.GetRequiredService<Func<CancellationToken, Task<(Uri BaseUri, string? Credential)>>>()));
         services.AddSingleton<IEnvoyRelay>(sp => sp.GetRequiredService<RelayHttpClient>());
         services.AddSingleton<IAvatarUploader>(sp => sp.GetRequiredService<RelayHttpClient>());
         services.AddSingleton<IAvatarImageSource>(sp => new RedLeafAvatarImageSource(

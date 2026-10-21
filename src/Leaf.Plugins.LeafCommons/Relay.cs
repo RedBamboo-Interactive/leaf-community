@@ -31,22 +31,16 @@ public sealed class RelayFeatureUnavailableException(string feature)
 
 public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Task<(Uri BaseUri, string? Credential)>> settings) : IEnvoyRelay, IAvatarUploader
 {
-    public RelayHttpClient(HttpClient http, Func<(Uri BaseUri, string? Credential)> settings)
-        : this(http, _ => Task.FromResult(settings())) { }
-
-    public Uri BuildAuthorizeUri(Uri callback, IEnumerable<string> scenarios)
-        => BuildAuthorizeUriAsync(callback, scenarios).GetAwaiter().GetResult();
-
     public async Task<Uri> BuildAuthorizeUriAsync(Uri callback, IEnumerable<string> scenarios, CancellationToken ct = default)
     {
-        var (baseUri, _) = await settings(ct);
+        var (baseUri, _) = await settings(ct).ConfigureAwait(false);
         if (!(callback.Scheme == "leaf" || (callback.Scheme == "http" && callback.IsLoopback))) throw new ArgumentException("OAuth callback must be leaf: or loopback HTTP");
         return new Uri(baseUri, "/v1/oauth/authorize?connectorRedirectUri=" + Uri.EscapeDataString(callback.ToString()) + "&scenarios=" + Uri.EscapeDataString(string.Join(',', scenarios)));
     }
 
     public async Task<OAuthExchange> ExchangeAsync(string exchangeCode, CancellationToken ct = default)
     {
-        var (baseUri, _) = await settings(ct);
+        var (baseUri, _) = await settings(ct).ConfigureAwait(false);
         using var response = await http.PostAsJsonAsync(new Uri(baseUri, "/v1/oauth/exchange"), new { exchangeCode }, ct);
         response.EnsureSuccessStatusCode();
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
@@ -64,7 +58,7 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
         string publicName, IReadOnlyDictionary<string, bool> scenarioToggles,
         CancellationToken ct = default)
     {
-        var (baseUri, credential) = await settings(ct);
+        var (baseUri, credential) = await settings(ct).ConfigureAwait(false);
         return await UpdateProfileAtAsync(baseUri, credential, publicName, scenarioToggles, ct);
     }
 
@@ -193,7 +187,7 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
 
     private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, HttpContent? content, CancellationToken ct)
     {
-        var (baseUri, credential) = await settings(ct);
+        var (baseUri, credential) = await settings(ct).ConfigureAwait(false);
         return await SendAuthenticatedAsync(baseUri, credential, method, path, content, ct);
     }
 
@@ -271,7 +265,7 @@ public sealed class ConnectorCore(Func<EnvoyRunRequest, CancellationToken, Task>
     }
 }
 
-public sealed class RelayConnector(Func<(Uri BaseUri, string? Credential)> settings, ConnectorCore core,
+public sealed class RelayConnector(Func<CancellationToken, Task<(Uri BaseUri, string? Credential)>> settings, ConnectorCore core,
     CommonsStateStore state, ILogger<RelayConnector> logger) : IAsyncDisposable
 {
     private readonly SemaphoreSlim single = new(1, 1);
@@ -309,7 +303,7 @@ public sealed class RelayConnector(Func<(Uri BaseUri, string? Credential)> setti
 
     private async Task ConnectOnceAsync(CancellationToken ct)
     {
-        var (baseUri, credential) = settings();
+        var (baseUri, credential) = await settings(ct).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(credential)) { await SetStatusAsync("disconnected", ct); await Task.Delay(TimeSpan.FromSeconds(5), ct); return; }
         var uri = new UriBuilder(baseUri) { Scheme = baseUri.Scheme == "https" ? "wss" : "ws", Path = "/v1/connect", Query = "" }.Uri;
         using var ws = new ClientWebSocket(); ws.Options.SetRequestHeader("Authorization", "Bearer " + credential);

@@ -17,7 +17,7 @@ public sealed class SecurityTests : IDisposable
     public async Task Shareable_build_excludes_git_ignored_secrets_binary_and_large_files_and_is_idempotent()
     {
         var source = Path.Combine(root, "source"); Directory.CreateDirectory(source);
-        RunGit(source, "init");
+        await RunGitAsync(source, "init");
         await File.WriteAllTextAsync(Path.Combine(source, ".gitignore"), "ignored.txt\n");
         await File.WriteAllTextAsync(Path.Combine(source, "ok.cs"), "public class OrdinaryEngineeringText {}\n");
         await File.WriteAllTextAsync(Path.Combine(source, "ignored.txt"), "ignored\n");
@@ -405,9 +405,9 @@ public sealed class SecurityTests : IDisposable
         return path;
     }
 
-    private static void RunGit(string cwd, params string[] arguments)
+    private static async Task RunGitAsync(string cwd, params string[] arguments)
     {
-        var result = new ProcessLauncher().RunAsync("git", arguments, cwd).GetAwaiter().GetResult();
+        var result = await new ProcessLauncher().RunAsync("git", arguments, cwd);
         Assert.True(result.ExitCode == 0, result.StandardError);
     }
 }
