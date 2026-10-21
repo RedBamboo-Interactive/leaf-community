@@ -31,6 +31,9 @@ public sealed class RelayFeatureUnavailableException(string feature)
 
 public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Task<(Uri BaseUri, string? Credential)>> settings) : IEnvoyRelay, IAvatarUploader
 {
+    public Task<RelayProfile> ReadProfileAsync(CancellationToken ct = default)
+        => PatchProfileAsync(null, null, null, ct);
+
     public async Task<Uri> BuildAuthorizeUriAsync(Uri callback, IEnumerable<string> scenarios,
         CancellationToken ct = default, string? agentEntityId = null, string? agentName = null)
     {
@@ -93,14 +96,26 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
     public async Task<RelayProfile> UpdateAgentProfileAsync(
         string publicName, string agentName, IReadOnlyDictionary<string, bool> scenarioToggles,
         CancellationToken ct = default)
+        => await PatchProfileAsync(publicName, agentName, scenarioToggles, ct);
+
+    public async Task<RelayProfile> PatchProfileAsync(
+        string? publicName, string? agentName,
+        IReadOnlyDictionary<string, bool>? scenarioToggles,
+        CancellationToken ct = default)
     {
         var (baseUri, credential) = await settings(ct).ConfigureAwait(false);
+        var body = new JsonObject();
+        if (publicName is not null) body["publicName"] = publicName;
+        if (agentName is not null) body["agentName"] = agentName;
+        if (scenarioToggles is not null)
+            body["scenarioToggles"] = JsonSerializer.SerializeToNode(scenarioToggles);
         using var response = await SendAuthenticatedAsync(baseUri, credential, HttpMethod.Patch,
-            "/v1/profile", JsonContent.Create(new { publicName, agentName, scenarioToggles }), ct);
+            "/v1/profile", JsonContent.Create(body), ct);
         using var json = await ReadJsonAsync(response, ct);
         if (!response.IsSuccessStatusCode) throw RelayError(response, json.RootElement, "profile_update_failed");
         var envoy = json.RootElement.TryGetProperty("envoy", out var wrapped) ? wrapped : json.RootElement;
-        var acceptedName = String(envoy, "publicName") ?? publicName;
+        var acceptedName = String(envoy, "publicName") ?? publicName
+            ?? throw new InvalidDataException("Relay profile response omitted publicName");
         var acceptedAgentName = String(envoy, "agentName") ?? agentName;
         var persona = String(envoy, "personaName") ?? $"{acceptedAgentName} · {acceptedName}";
         return new(acceptedName, persona, acceptedAgentName);
@@ -299,7 +314,8 @@ public sealed class ConnectorCore(Func<EnvoyRunRequest, CancellationToken, Task>
 }
 
 public sealed class RelayConnector(Func<CancellationToken, Task<(Uri BaseUri, string? Credential)>> settings, ConnectorCore core,
-    Func<string, CancellationToken, Task> setStatus, ILogger<RelayConnector> logger) : IAsyncDisposable
+    Func<string, CancellationToken, Task> setStatus, ILogger<RelayConnector> logger,
+    Func<CancellationToken, Task>? onConnected = null) : IAsyncDisposable
 {
     private readonly SemaphoreSlim single = new(1, 1);
     private CancellationTokenSource? running;
@@ -341,6 +357,7 @@ public sealed class RelayConnector(Func<CancellationToken, Task<(Uri BaseUri, st
         var uri = new UriBuilder(baseUri) { Scheme = baseUri.Scheme == "https" ? "wss" : "ws", Path = "/v1/connect", Query = "" }.Uri;
         using var ws = new ClientWebSocket(); ws.Options.SetRequestHeader("Authorization", "Bearer " + credential);
         await ws.ConnectAsync(uri, ct);
+        if (onConnected is not null) await onConnected(ct);
         await SetStatusAsync("active", ct);
         var buffer = new byte[64 * 1024];
         while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested)

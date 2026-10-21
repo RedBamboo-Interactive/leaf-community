@@ -200,8 +200,31 @@ public sealed class PublicAgentCoordinator(
         subscriptions.Add(events.Subscribe("entity.updated", OnEntityUpdatedAsync));
         subscriptions.Add(events.Subscribe("entity.deleted", OnEntityDeletedAsync));
         foreach (var agent in await state.ListPublicAgentsAsync(enabledOnly: true, ct: applicationStopping))
+        {
+            await ReconcileRelayProfileSafeAsync(agent.AgentEntityId);
             await SyncAgentNameSafeAsync(agent.AgentEntityId);
+        }
         await ReconcileAsync(applicationStopping);
+    }
+
+    public async Task<RelayProfile> ReconcileRelayProfileAsync(
+        string agentEntityId, CancellationToken ct = default)
+    {
+        var profile = await relays.For(agentEntityId).ReadProfileAsync(ct);
+        var owner = await state.GetOwnerSettingsAsync(ct);
+        await state.SaveOwnerSettingsAsync(owner with
+        {
+            PublicName = profile.PublicName,
+            RelayConfirmedPublicName = profile.PublicName,
+        }, ct);
+        var agent = await state.GetPublicAgentAsync(agentEntityId, ct);
+        if (agent is not null)
+            await state.SavePublicAgentAsync(agent with
+            {
+                AgentName = string.IsNullOrWhiteSpace(profile.AgentName)
+                    ? agent.AgentName : profile.AgentName,
+            }, ct);
+        return profile;
     }
 
     public async Task RefreshAsync(string agentEntityId, CancellationToken ct = default)
@@ -262,13 +285,12 @@ public sealed class PublicAgentCoordinator(
         if (entity is null) { await SuspendAsync(agentEntityId, "agent_removed", ct); return; }
         if (string.Equals(entity.Name, settings.AgentName, StringComparison.Ordinal)) return;
         var profile = string.IsNullOrWhiteSpace(settings.Credential)
-            ? new RelayProfile(configuration.Owner.PublicName, $"{entity.Name} · {configuration.Owner.PublicName}", entity.Name)
-            : await relays.For(agentEntityId).UpdateAgentProfileAsync(configuration.Owner.PublicName,
-                entity.Name, settings.ScenarioToggles, ct);
+            ? new RelayProfile(configuration.Owner.PublicName,
+                $"{entity.Name} \u00b7 {configuration.Owner.PublicName}", entity.Name)
+            : await relays.For(agentEntityId).PatchProfileAsync(null, entity.Name, null, ct);
         await state.SavePublicAgentAsync(settings with
         {
             AgentName = profile.AgentName ?? entity.Name,
-            Persona = profile.PersonaName,
         }, ct);
         await audit.RecordAsync("agent_name_synced", new Dictionary<string, object?>
             { ["agent_entity_id"] = agentEntityId, ["agent_name"] = entity.Name }, ct);
@@ -284,7 +306,8 @@ public sealed class PublicAgentCoordinator(
                 agentEntityId, StringComparison.OrdinalIgnoreCase));
             return (new Uri(configuration.Owner.RelayBaseUrl), agent.Credential);
         }, core, (status, ct) => SetStatusAsync(agentEntityId, status, ct),
-            loggers.CreateLogger<RelayConnector>());
+            loggers.CreateLogger<RelayConnector>(),
+            ct => ReconcileRelayProfileAsync(agentEntityId, ct));
     }
 
     private async Task SetStatusAsync(string agentEntityId, string status, CancellationToken ct)
@@ -312,6 +335,18 @@ public sealed class PublicAgentCoordinator(
         catch (RelayApiException error)
         {
             await audit.RecordAsync("agent_name_sync_failed", new Dictionary<string, object?>
+                { ["agent_entity_id"] = agentEntityId, ["reason"] = error.Reason }, CancellationToken.None);
+        }
+    }
+
+    private async Task ReconcileRelayProfileSafeAsync(string agentEntityId)
+    {
+        var settings = await state.GetPublicAgentAsync(agentEntityId, CancellationToken.None);
+        if (string.IsNullOrWhiteSpace(settings?.Credential)) return;
+        try { await ReconcileRelayProfileAsync(agentEntityId, CancellationToken.None); }
+        catch (RelayApiException error)
+        {
+            await audit.RecordAsync("relay_profile_read_failed", new Dictionary<string, object?>
                 { ["agent_entity_id"] = agentEntityId, ["reason"] = error.Reason }, CancellationToken.None);
         }
     }

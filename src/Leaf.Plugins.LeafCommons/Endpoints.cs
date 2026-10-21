@@ -11,7 +11,8 @@ public sealed record PublicAgentUpdate(
 
 public sealed record SettingsUpdate(
     string RelayBaseUrl, string PublicName, string[] PersonalWords, string[] Canaries,
-    string[] LinkAllowlist, string? OwnerUserId, PublicAgentUpdate[] Agents);
+    string[] LinkAllowlist, string? OwnerUserId, PublicAgentUpdate[] Agents,
+    string? RelayConfirmedPublicName = null);
 
 public static class CommonsEndpoints
 {
@@ -52,16 +53,44 @@ public static class CommonsEndpoints
 
             var owner = await store.SaveOwnerSettingsAsync(configuration.Owner with
             {
-                RelayBaseUrl = relay.ToString(), PublicName = update.PublicName,
+                RelayBaseUrl = relay.ToString(),
                 PersonalWords = update.PersonalWords, Canaries = update.Canaries,
                 LinkAllowlist = update.LinkAllowlist, OwnerUserId = ownerId,
             }, ct);
+            var profileAgent = configuration.Agents.FirstOrDefault(agent => agent.Enabled
+                && !string.IsNullOrWhiteSpace(agent.Credential));
+            if (profileAgent is not null)
+            {
+                try
+                {
+                    await coordinator.ReconcileRelayProfileAsync(profileAgent.AgentEntityId, ct);
+                    owner = await store.GetOwnerSettingsAsync(ct);
+                }
+                catch (RelayApiException error)
+                {
+                    return Results.Json(new { error = error.Reason, message = error.Message,
+                        agentId = profileAgent.AgentEntityId }, statusCode: error.StatusCode);
+                }
+            }
+            var requestedNameDiffers = owner.RelayConfirmedPublicName is not null
+                && !string.Equals(update.PublicName,
+                    owner.RelayConfirmedPublicName, StringComparison.Ordinal);
+            var publicNameChanged = IsExplicitPublicNameChange(update.PublicName,
+                update.RelayConfirmedPublicName, owner.RelayConfirmedPublicName);
+            if (requestedNameDiffers && !publicNameChanged)
+                return Results.Conflict(new { error = "public_name_stale",
+                    message = "The relay public name changed. Reload settings before changing it.",
+                    publicName = owner.PublicName });
+            var publicNamePending = publicNameChanged;
+            if (!requestedNameDiffers && owner.PublicName != owner.RelayConfirmedPublicName)
+                owner = await store.SaveOwnerSettingsAsync(owner with
+                    { PublicName = owner.RelayConfirmedPublicName ?? owner.PublicName }, ct);
             foreach (var requested in update.Agents)
             {
                 var live = owned[requested.AgentId];
                 var current = await store.GetPublicAgentAsync(requested.AgentId, ct)
                     ?? new(null, requested.AgentId, live.Name, false, null, "disconnected",
-                        $"{live.Name} · {owner.PublicName}", null, new Dictionary<string, bool>(), []);
+                        null, new Dictionary<string, bool>(), []);
                 if (!requested.Enabled && current.Enabled)
                 {
                     await coordinator.SuspendAsync(requested.AgentId, "owner_disabled", ct);
@@ -71,7 +100,6 @@ public static class CommonsEndpoints
                 var saved = await store.SavePublicAgentAsync(current with
                 {
                     Enabled = requested.Enabled, AgentName = live.Name,
-                    Persona = $"{live.Name} · {owner.PublicName}",
                     ScenarioToggles = requested.ScenarioToggles,
                     ShareableFolders = requested.ShareableFolders,
                     AvatarSource = requested.AvatarSource,
@@ -84,13 +112,18 @@ public static class CommonsEndpoints
                 {
                     try
                     {
-                        var profile = await relays.For(saved.AgentEntityId).UpdateAgentProfileAsync(
-                            owner.PublicName, live.Name, saved.ScenarioToggles, ct);
-                        if (!string.Equals(owner.PublicName, profile.PublicName, StringComparison.Ordinal))
+                        var profile = await relays.For(saved.AgentEntityId).PatchProfileAsync(
+                            publicNamePending ? update.PublicName : null,
+                            live.Name, saved.ScenarioToggles, ct);
+                        publicNamePending = false;
+                        if (!string.Equals(owner.PublicName, profile.PublicName, StringComparison.Ordinal)
+                            || !string.Equals(owner.RelayConfirmedPublicName, profile.PublicName,
+                                StringComparison.Ordinal))
                             owner = await store.SaveOwnerSettingsAsync(owner with
-                                { PublicName = profile.PublicName }, ct);
+                                { PublicName = profile.PublicName,
+                                    RelayConfirmedPublicName = profile.PublicName }, ct);
                         saved = await store.SavePublicAgentAsync(saved with
-                            { AgentName = profile.AgentName ?? live.Name, Persona = profile.PersonaName }, ct);
+                            { AgentName = profile.AgentName ?? live.Name }, ct);
                         if (avatarChanged) await avatars.SyncAsync(saved.AgentEntityId, ct);
                     }
                     catch (RelayApiException error)
@@ -106,6 +139,9 @@ public static class CommonsEndpoints
                 }
                 await coordinator.RefreshAsync(saved.AgentEntityId, ct);
             }
+            if (publicNamePending)
+                return Results.Conflict(new { error = "public_name_requires_public_agent",
+                    message = "Enable and join an Agent before changing the relay public name." });
             configuration = await store.GetConfigurationAsync(ct);
             return Results.Ok(SettingsProjection(configuration, await directory.ListAsync(ownerId, ct),
                 await avatars.IsOutfitsAvailableAsync(ct)));
@@ -146,15 +182,17 @@ public static class CommonsEndpoints
             var owned = await directory.GetAsync(agentId, auth.UserId, ct);
             if (owned is null) return Results.BadRequest(new { error = "agent_not_owned" });
             var exchange = await relays.ForEnrollment(agentId).ExchangeAsync(exchangeCode, ct);
-            if (!string.Equals(configuration.Owner.PublicName, exchange.PublicName, StringComparison.Ordinal))
-                await store.SaveOwnerSettingsAsync(configuration.Owner with { PublicName = exchange.PublicName }, ct);
+            if (!string.Equals(configuration.Owner.PublicName, exchange.PublicName, StringComparison.Ordinal)
+                || !string.Equals(configuration.Owner.RelayConfirmedPublicName,
+                    exchange.PublicName, StringComparison.Ordinal))
+                await store.SaveOwnerSettingsAsync(configuration.Owner with
+                    { PublicName = exchange.PublicName,
+                        RelayConfirmedPublicName = exchange.PublicName }, ct);
             var saved = await store.SavePublicAgentAsync(before with
             {
                 Credential = exchange.Credential,
                 ConnectionStatus = exchange.Status == "pending" ? "pending approval" : exchange.Status,
                 AgentName = exchange.AgentName ?? owned.Name,
-                Persona = string.IsNullOrWhiteSpace(exchange.PersonaName)
-                    ? $"{owned.Name} · {exchange.PublicName}" : exchange.PersonaName,
                 EnvoyId = exchange.EnvoyId,
                 Avatar = exchange.AvatarObjectKey,
                 AvatarContentHash = null,
@@ -283,6 +321,12 @@ public static class CommonsEndpoints
     public static bool CanCompleteOAuthCallback(PublicAgentSettings settings, OAuthStateConsumption state) =>
         state.Status == OAuthStateStatus.Accepted && (!IsActive(settings) || state.AllowActiveOverwrite);
 
+    public static bool IsExplicitPublicNameChange(string requested, string? clientConfirmed,
+        string? currentRelayConfirmed) =>
+        !string.IsNullOrWhiteSpace(clientConfirmed)
+        && string.Equals(clientConfirmed, currentRelayConfirmed, StringComparison.Ordinal)
+        && !string.Equals(requested, currentRelayConfirmed, StringComparison.Ordinal);
+
     private static bool IsOwner(IAuthContext auth, CommonsSettings settings) => auth.IsInRole("admin") || IsConfiguredOwner(auth, settings);
     private static bool IsOwner(IAuthContext auth, CommonsOwnerSettings settings) => auth.IsInRole("admin") || IsConfiguredOwner(auth, settings);
     private static bool IsConfiguredOwner(IAuthContext auth, CommonsSettings settings) => !string.IsNullOrWhiteSpace(auth.UserId) && string.Equals(auth.UserId, settings.OwnerUserId, StringComparison.Ordinal);
@@ -299,6 +343,7 @@ public static class CommonsEndpoints
         {
             relayBaseUrl = configuration.Owner.RelayBaseUrl,
             publicName = configuration.Owner.PublicName,
+            relayConfirmedPublicName = configuration.Owner.RelayConfirmedPublicName,
             personalWords = configuration.Owner.PersonalWords,
             canaries = configuration.Owner.Canaries,
             linkAllowlist = configuration.Owner.LinkAllowlist,
@@ -315,7 +360,7 @@ public static class CommonsEndpoints
                     enabled = value?.Enabled == true,
                     credentialConfigured = !string.IsNullOrWhiteSpace(value?.Credential),
                     connectionStatus = value?.ConnectionStatus ?? "not-public",
-                    persona = value?.Persona ?? $"{agent.Name} · {configuration.Owner.PublicName}",
+                    persona = $"{agent.Name} \u00b7 {configuration.Owner.PublicName}",
                     avatarSource = value?.AvatarSource ?? AvatarSources.AgentAvatar,
                     avatarSyncStatus = value?.AvatarSyncStatus ?? "not-synced",
                     avatarSyncReason = value?.AvatarSyncReason,

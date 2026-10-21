@@ -154,7 +154,7 @@ public sealed class PublicAgentRuntime(
         var audit = new AgentScopedAudit(state, agentEntityId);
         var runner = new EnvoyRunner(model, shareables.For(agentEntityId), relays.For(agentEntityId),
             filter, audit, configuration.Owner.PersonalWords, configuration.Owner.Canaries,
-            speakerName: agent.Persona);
+            speakerName: agent.DisplayPersona(configuration.Owner.PublicName));
         var result = await runner.RunAsync(request, ct);
         if (result.State == "blocked" && !string.IsNullOrWhiteSpace(request.ThreadRef))
             await digests.DeliverAsync(new("owner_notice",

@@ -44,7 +44,8 @@ public sealed class MultiAgentTests : IDisposable
         Assert.Equal(NovaId, agent.AgentEntityId);
         Assert.Equal("credential-to-preserve", agent.Credential);
         Assert.Equal("Nova", agent.AgentName);
-        Assert.Equal("Laurent", configuration.Owner.PublicName);
+        Assert.Equal("", configuration.Owner.PublicName);
+        Assert.Null(configuration.Owner.RelayConfirmedPublicName);
         var ownerEntity = await entities.GetBySlugAsync("leaf-commons-settings", "settings");
         Assert.Equal(2, ownerEntity!.Data["schema_version"]!.GetValue<int>());
         Assert.False(ownerEntity.Data.ContainsKey("envoy_credential"));
@@ -84,11 +85,54 @@ public sealed class MultiAgentTests : IDisposable
 
         var saved = await store.GetPublicAgentAsync(NovaId);
         Assert.Equal("Renamed Agent", saved!.AgentName);
-        Assert.Equal("Renamed Agent · Laurent", saved.Persona);
+        Assert.Equal("Renamed Agent · Laurent", saved.DisplayPersona("Laurent"));
         var request = Assert.Single(handler.Requests);
         Assert.Equal("PATCH /v1/profile", request.Route);
         Assert.Equal("credential-one", request.Credential);
         Assert.Contains("\"agentName\":\"Renamed Agent\"", request.Body);
+        Assert.DoesNotContain("publicName", request.Body);
+    }
+
+    [Fact]
+    public async Task Stale_local_public_name_is_replaced_from_relay_and_is_never_written_back()
+    {
+        var entities = new MemoryEntityStore();
+        var store = new CommonsStateStore(entities);
+        await store.SaveOwnerSettingsAsync(new(null, "https://relay.example", "Laurent",
+            [], [], [], "test"));
+        await store.SavePublicAgentAsync(Agent(NovaId, "Nova", "credential-one"));
+        var handler = new MultiAgentRelayHandler("Lynial");
+        await using var coordinator = Coordinator(store, entities, handler);
+
+        var profile = await coordinator.ReconcileRelayProfileAsync(NovaId);
+
+        Assert.Equal("Lynial", profile.PublicName);
+        var owner = await store.GetOwnerSettingsAsync();
+        Assert.Equal("Lynial", owner.PublicName);
+        Assert.Equal("Lynial", owner.RelayConfirmedPublicName);
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal("{}", request.Body);
+        Assert.DoesNotContain("Laurent", request.Body);
+        Assert.False(CommonsEndpoints.IsExplicitPublicNameChange(
+            "Laurent", clientConfirmed: null, currentRelayConfirmed: "Lynial"));
+    }
+
+    [Fact]
+    public async Task Derived_persona_round_trips_middle_dot_as_utf8_and_is_not_persisted()
+    {
+        var entities = new MemoryEntityStore();
+        var store = new CommonsStateStore(entities);
+        var owner = await store.SaveOwnerSettingsAsync(new(null, "https://relay.example",
+            "Lynial", [], [], [], "test", "Lynial"));
+        var agent = await store.SavePublicAgentAsync(Agent(NovaId, "Nova", "credential-one"));
+
+        var persona = agent.DisplayPersona(owner.PublicName);
+        var utf8 = JsonSerializer.SerializeToUtf8Bytes(new { persona });
+        using var json = JsonDocument.Parse(utf8);
+
+        Assert.Equal("Nova · Lynial", json.RootElement.GetProperty("persona").GetString());
+        var stored = Assert.Single(await entities.QueryAsync(new() { TypeSlug = "leaf-commons-public-agent" }));
+        Assert.False(stored.Data.ContainsKey("persona"));
     }
 
     [Fact]
@@ -171,7 +215,7 @@ public sealed class MultiAgentTests : IDisposable
         => store.SaveOwnerSettingsAsync(new(null, "https://relay.example", "Laurent", [], [], [], "test"));
 
     private static PublicAgentSettings Agent(string id, string name, string credential) => new(
-        null, id, name, true, credential, "active", $"{name} · Laurent", null,
+        null, id, name, true, credential, "active", null,
         new Dictionary<string, bool> { ["showcase"] = true }, []);
 
     private PublicAgentRuntime Runtime(CommonsStateStore store, MultiAgentRelayHandler handler)
@@ -193,7 +237,7 @@ internal sealed class FixedHttpClientFactory(HttpMessageHandler handler) : IHttp
     public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
 }
 
-internal sealed class MultiAgentRelayHandler : HttpMessageHandler
+internal sealed class MultiAgentRelayHandler(string relayPublicName = "Laurent") : HttpMessageHandler
 {
     public List<(string Route, string? Credential, string Body)> Requests { get; } = [];
 
@@ -206,9 +250,13 @@ internal sealed class MultiAgentRelayHandler : HttpMessageHandler
         object payload;
         using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(body) ? "{}" : body);
         if (request.RequestUri.AbsolutePath == "/v1/profile"
-            && document.RootElement.TryGetProperty("agentName", out var agentName))
-            payload = new { envoy = new { publicName = "Laurent",
-                agentName = agentName.GetString(), personaName = $"{agentName.GetString()} · Laurent" } };
+            && !document.RootElement.TryGetProperty("suspended", out _))
+        {
+            var agentName = document.RootElement.TryGetProperty("agentName", out var requestedAgentName)
+                ? requestedAgentName.GetString() : "Nova";
+            payload = new { envoy = new { publicName = relayPublicName,
+                agentName, personaName = $"{agentName} · {relayPublicName}" } };
+        }
         else if (request.RequestUri.AbsolutePath == "/v1/posts")
             payload = new { decision = "posted", messageId = "message-1", threadId = "thread-1" };
         else payload = new { ok = true };

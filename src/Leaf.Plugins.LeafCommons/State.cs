@@ -50,18 +50,20 @@ public sealed record CommonsOwnerSettings(
     IReadOnlyList<string> PersonalWords,
     IReadOnlyList<string> Canaries,
     IReadOnlyList<string> LinkAllowlist,
-    string? OwnerUserId)
+    string? OwnerUserId,
+    string? RelayConfirmedPublicName = null)
 {
     public object Public(IReadOnlyList<PublicAgentSettings> agents, bool outfitsAvailable) => new
     {
         relayBaseUrl = RelayBaseUrl,
         publicName = PublicName,
+        relayConfirmedPublicName = RelayConfirmedPublicName,
         personalWords = PersonalWords,
         canaries = Canaries,
         linkAllowlist = LinkAllowlist,
         ownerUserId = OwnerUserId,
         outfitsAvailable,
-        agents = agents.Select(agent => agent.Public()).ToArray(),
+        agents = agents.Select(agent => agent.Public(PublicName)).ToArray(),
     };
 }
 
@@ -72,7 +74,6 @@ public sealed record PublicAgentSettings(
     bool Enabled,
     string? Credential,
     string ConnectionStatus,
-    string Persona,
     string? Avatar,
     IReadOnlyDictionary<string, bool> ScenarioToggles,
     IReadOnlyList<string> ShareableFolders,
@@ -84,14 +85,16 @@ public sealed record PublicAgentSettings(
     DateTimeOffset? AvatarSyncedAt = null,
     string? EnvoyId = null)
 {
-    public object Public() => new
+    public string DisplayPersona(string publicName) => $"{AgentName} \u00b7 {publicName}";
+
+    public object Public(string publicName) => new
     {
         agentId = AgentEntityId,
         agentName = AgentName,
         enabled = Enabled,
         credentialConfigured = !string.IsNullOrWhiteSpace(Credential),
         connectionStatus = ConnectionStatus,
-        persona = Persona,
+        persona = DisplayPersona(publicName),
         avatar = Avatar,
         avatarSource = AvatarSource,
         avatarSyncStatus = AvatarSyncStatus,
@@ -188,14 +191,15 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
 
     public async Task<CommonsSettings> SaveSettingsAsync(CommonsSettings value, CancellationToken ct = default)
     {
+        var current = await GetOwnerSettingsAsync(ct);
         var owner = await SaveOwnerSettingsAsync(new(value.EntityId, value.RelayBaseUrl,
             value.EffectivePublicName, value.PersonalWords, value.Canaries,
-            value.LinkAllowlist, value.OwnerUserId), ct);
+            value.LinkAllowlist, value.OwnerUserId, current.RelayConfirmedPublicName), ct);
         var agentId = string.IsNullOrWhiteSpace(value.AgentEntityId)
             ? LegacyNovaAgentId : value.AgentEntityId;
         var agent = await SavePublicAgentAsync(new(null, agentId!,
             string.IsNullOrWhiteSpace(value.Persona) ? "Agent" : AgentNameFromPersona(value.Persona, owner.PublicName),
-            true, value.Credential, value.ConnectionStatus, value.Persona, value.Avatar,
+            true, value.Credential, value.ConnectionStatus, value.Avatar,
             value.ScenarioToggles, value.ShareableFolders, value.AvatarSource,
             value.AvatarContentHash, value.AvatarSyncStatus, value.AvatarSyncReason,
             value.AvatarResolvedAssetId, value.AvatarSyncedAt, value.EnvoyId), ct);
@@ -360,15 +364,16 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
             if (entity is null || entity.Data["schema_version"]?.GetValue<int?>() == 2) return;
 
             var legacy = FromEntity(entity);
+            var legacyPublicName = legacy.EffectivePublicName;
             var owner = new CommonsOwnerSettings(entity.Id, legacy.RelayBaseUrl,
-                legacy.EffectivePublicName, legacy.PersonalWords, legacy.Canaries,
+                "", legacy.PersonalWords, legacy.Canaries,
                 legacy.LinkAllowlist, legacy.OwnerUserId);
             var agentId = Guid.TryParse(legacy.AgentEntityId, out var parsed)
                 ? parsed : Guid.Parse(LegacyNovaAgentId);
-            var agentName = AgentNameFromPersona(legacy.Persona, owner.PublicName);
+            var agentName = AgentNameFromPersona(legacy.Persona, legacyPublicName);
             await entities.UpsertBySlugAsync("leaf-commons-public-agent", PublicAgentSlug(agentId.ToString()),
                 $"Public Agent: {agentName}", AgentToData(new(null, agentId.ToString(), agentName,
-                    true, legacy.Credential, legacy.ConnectionStatus, legacy.Persona, legacy.Avatar,
+                    true, legacy.Credential, legacy.ConnectionStatus, legacy.Avatar,
                     legacy.ScenarioToggles, legacy.ShareableFolders, legacy.AvatarSource,
                     legacy.AvatarContentHash, legacy.AvatarSyncStatus, legacy.AvatarSyncReason,
                     legacy.AvatarResolvedAssetId, legacy.AvatarSyncedAt, legacy.EnvoyId)), ct);
@@ -389,7 +394,8 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         var data = entity.Data;
         return new(entity.Id, S(data, "relay_base_url") ?? "http://127.0.0.1:8787",
             S(data, "public_name") ?? "", List(data["personal_words"]),
-            List(data["canaries"]), List(data["link_allowlist"]), S(data, "owner_user_id"));
+            List(data["canaries"]), List(data["link_allowlist"]), S(data, "owner_user_id"),
+            S(data, "relay_confirmed_public_name"));
     }
 
     private static JsonObject OwnerToData(CommonsOwnerSettings value) => new()
@@ -397,6 +403,7 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         ["schema_version"] = 2,
         ["relay_base_url"] = value.RelayBaseUrl,
         ["public_name"] = value.PublicName,
+        ["relay_confirmed_public_name"] = value.RelayConfirmedPublicName,
         ["personal_words"] = JsonSerializer.SerializeToNode(value.PersonalWords),
         ["canaries"] = JsonSerializer.SerializeToNode(value.Canaries),
         ["link_allowlist"] = JsonSerializer.SerializeToNode(value.LinkAllowlist),
@@ -411,7 +418,7 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         return new(entity.Id, agentId, agentName,
             data["enabled"]?.GetValue<bool?>() == true,
             S(data, "envoy_credential"), S(data, "connection_status") ?? "disconnected",
-            S(data, "persona") ?? agentName, S(data, "avatar"),
+            S(data, "avatar"),
             Dict(data["scenario_toggles"]), List(data["shareable_folders"]),
             S(data, "avatar_source") is { } source && AvatarSources.IsValid(source)
                 ? source : AvatarSources.AgentAvatar,
@@ -427,7 +434,6 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         ["enabled"] = value.Enabled,
         ["envoy_credential"] = value.Credential,
         ["connection_status"] = value.ConnectionStatus,
-        ["persona"] = value.Persona,
         ["avatar"] = value.Avatar,
         ["scenario_toggles"] = JsonSerializer.SerializeToNode(value.ScenarioToggles),
         ["shareable_folders"] = JsonSerializer.SerializeToNode(value.ShareableFolders),
@@ -442,7 +448,7 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
 
     private static CommonsSettings ToLegacy(CommonsOwnerSettings owner, PublicAgentSettings? agent)
         => new(owner.EntityId, owner.RelayBaseUrl, agent?.Credential,
-            agent?.ConnectionStatus ?? "disconnected", agent?.Persona ?? "Agent", agent?.Avatar,
+            agent?.ConnectionStatus ?? "disconnected", agent?.DisplayPersona(owner.PublicName) ?? "Agent", agent?.Avatar,
             agent?.ScenarioToggles ?? new Dictionary<string, bool>(),
             agent?.ShareableFolders ?? [], owner.PersonalWords, owner.Canaries, null,
             owner.LinkAllowlist, owner.OwnerUserId, agent?.AgentEntityId,

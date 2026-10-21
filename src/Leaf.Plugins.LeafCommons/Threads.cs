@@ -239,7 +239,7 @@ public sealed class PublicAgentThreads(
 
     private static CommonsSettings Legacy(CommonsOwnerSettings owner, PublicAgentSettings agent)
         => new(owner.EntityId, owner.RelayBaseUrl, agent.Credential, agent.ConnectionStatus,
-            agent.Persona, agent.Avatar, agent.ScenarioToggles, agent.ShareableFolders,
+            agent.DisplayPersona(owner.PublicName), agent.Avatar, agent.ScenarioToggles, agent.ShareableFolders,
             owner.PersonalWords, owner.Canaries, null, owner.LinkAllowlist,
             owner.OwnerUserId, agent.AgentEntityId, agent.AvatarSource, agent.AvatarContentHash,
             agent.AvatarSyncStatus, agent.AvatarSyncReason, agent.AvatarResolvedAssetId,

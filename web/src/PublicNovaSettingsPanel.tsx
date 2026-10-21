@@ -15,6 +15,7 @@ import {
 type Settings = {
   relayBaseUrl: string
   publicName: string
+  relayConfirmedPublicName?: string
   outfitsAvailable: boolean
   personalWords: string[]
   canaries: string[]
@@ -68,6 +69,7 @@ function savePayload(settings: Settings) {
   return {
     relayBaseUrl: settings.relayBaseUrl,
     publicName: settings.publicName,
+    relayConfirmedPublicName: settings.relayConfirmedPublicName,
     personalWords: settings.personalWords,
     canaries: settings.canaries,
     linkAllowlist: settings.linkAllowlist,
