@@ -455,9 +455,17 @@ internal sealed class PromptCapturingModel(IEnumerable<string> actions) : IToolF
 internal sealed class FakeRelay : IEnvoyRelay
 {
     public List<string> Posts { get; } = [];
+    public List<(string ThreadRef, string Scenario, string Content)> Replies { get; } = [];
     public List<(string Scenario, string? Title, string Content, IReadOnlyList<string> Addresses)> Opened { get; } = [];
     public Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<RelayMessage>>([]);
     public Task<RelayPostResult> PostAsync(string threadRef, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default) { Posts.Add(content); return Task.FromResult(new RelayPostResult(true, MessageId: "m1")); }
+    public Task<RelayPostResult> ReplyAsync(string threadRef, string scenario, string content,
+        IReadOnlyList<string>? addresses = null, string? idempotencyKey = null,
+        CancellationToken ct = default)
+    {
+        Posts.Add(content); Replies.Add((threadRef, scenario, content));
+        return Task.FromResult(new RelayPostResult(true, MessageId: "m1"));
+    }
     public Task<RelayPostResult> OpenAsync(string scenario, string? threadName, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default) { Posts.Add(content); Opened.Add((scenario, threadName, content, addresses ?? [])); return Task.FromResult(new RelayPostResult(true, MessageId: "m1", ThreadId: "t1")); }
 }
 internal sealed class ScriptedPostRelay(IEnumerable<RelayPostResult> results) : IEnvoyRelay

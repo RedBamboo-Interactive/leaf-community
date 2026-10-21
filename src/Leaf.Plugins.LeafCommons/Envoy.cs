@@ -178,13 +178,17 @@ public interface IEnvoyRelay
 {
     Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default);
     Task<RelayPostResult> PostAsync(string threadRef, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default);
+    Task<RelayPostResult> ReplyAsync(string threadRef, string scenario, string content,
+        IReadOnlyList<string>? addresses = null, string? idempotencyKey = null,
+        CancellationToken ct = default) => PostAsync(threadRef, content, addresses, idempotencyKey, ct);
     Task<RelayPostResult> OpenAsync(string scenario, string? threadName, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default);
 }
 public sealed record RelayPostResult(bool Accepted, string? Code = null, string? MessageId = null, string? ThreadId = null);
 public interface ICommonsAudit { Task RecordAsync(string eventName, IReadOnlyDictionary<string, object?> safeMetadata, CancellationToken ct = default); }
 
 public sealed record EnvoyRunRequest(string? ThreadRef, string Kind, string Content,
-    string? SenderProvenance = null, string? TriggerId = null, bool Addressed = false);
+    string? SenderProvenance = null, string? TriggerId = null, bool Addressed = false,
+    string? Channel = null, string? ReplyToDisplayName = null);
 public sealed record EnvoyRunResult(string State, int Steps, string? Summary = null);
 
 public sealed class EnvoyRunner(
@@ -382,7 +386,10 @@ A successful post completes the run. Post at most one answer.
     private async Task<PostAttempt> AttemptPostAsync(EnvoyRunRequest request, string content,
         IReadOnlyList<string> addresses, int step, string keySuffix, CancellationToken ct)
     {
-        var decision = filter.Check(content, personalWords, canaries);
+        var deliveredContent = request.Kind == "channel_reply"
+            ? ChannelReplyContent(request.ReplyToDisplayName, content)
+            : content;
+        var decision = filter.Check(deliveredContent, personalWords, canaries);
         if (decision.Allowed)
             foreach (var address in addresses)
             {
@@ -400,7 +407,9 @@ A successful post completes the run. Post at most one answer.
         }, ct);
         if (!decision.Allowed) return new(decision, null);
 
-        var posted = await relay.PostAsync(request.ThreadRef!, content, addresses,
+        var posted = await relay.ReplyAsync(request.ThreadRef!,
+            request.Kind == "channel_reply" ? "channel_reply" : "consult_reply",
+            deliveredContent, addresses,
             StableKey(request, step) + "-" + keySuffix, ct);
         await audit.RecordAsync("relay_post", new Dictionary<string, object?>
         {
@@ -412,6 +421,16 @@ A successful post completes the run. Post at most one answer.
             ["messageId"] = posted.MessageId,
         }, ct);
         return new(decision, posted);
+    }
+
+    internal static string ChannelReplyContent(string? displayName, string content)
+    {
+        var safeName = string.Concat((displayName ?? "someone")
+            .Where(ch => ch is not '@' and not '<' and not '>' && !char.IsControl(ch)))
+            .Trim();
+        if (string.IsNullOrWhiteSpace(safeName)) safeName = "someone";
+        if (safeName.Length > 48) safeName = safeName[..48].TrimEnd();
+        return $"Replying to {safeName}: {content}";
     }
 
     private async Task TryPostFallbackAsync(EnvoyRunRequest request, int step, string keySuffix, CancellationToken ct)

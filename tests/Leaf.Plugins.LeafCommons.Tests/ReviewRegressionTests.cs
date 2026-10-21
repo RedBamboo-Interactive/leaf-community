@@ -62,6 +62,46 @@ public sealed class ReviewRegressionTests : IDisposable
         Assert.Equal(0, model.Calls);
     }
 
+    [Fact]
+    public async Task Addressed_showcase_text_reply_posts_to_its_message_chain_with_plain_text_context()
+    {
+        var relay = new FakeRelay();
+        var runner = new EnvoyRunner(
+            new CountingModel("{\"action\":\"post\",\"content\":\"2 + 2 is 4.\"}"),
+            new ShareableStore(root), relay, new OutboundFilter(new SecretScanner()),
+            new MemoryAudit(), [], []);
+
+        var result = await runner.RunAsync(new("message:showcase-root", "channel_reply",
+            "Hello! What's 2+2?", TriggerId: "live-1644", Addressed: true,
+            Channel: "showcase", ReplyToDisplayName: "Laurent"));
+
+        Assert.Equal("done", result.State);
+        var reply = Assert.Single(relay.Replies);
+        Assert.Equal("message:showcase-root", reply.ThreadRef);
+        Assert.Equal("channel_reply", reply.Scenario);
+        Assert.Equal("Replying to Laurent: 2 + 2 is 4.", reply.Content);
+    }
+
+    [Fact]
+    public async Task Addressed_text_channel_failure_posts_prefixed_safe_fallback()
+    {
+        var relay = new FakeRelay();
+        var runner = new EnvoyRunner(
+            new ThrowingModel(new ToolFreeGenerateException("fixture", "gateway_bad_gateway", 502)),
+            new ShareableStore(root), relay, new OutboundFilter(new SecretScanner()),
+            new MemoryAudit(), [], []);
+
+        var result = await runner.RunAsync(new("message:showcase-root", "channel_reply",
+            "question", TriggerId: "ping", Addressed: true,
+            Channel: "showcase", ReplyToDisplayName: "<@123> Laurent"));
+
+        Assert.Equal("failed", result.State);
+        var reply = Assert.Single(relay.Replies);
+        Assert.Equal("channel_reply", reply.Scenario);
+        Assert.DoesNotContain("<@", reply.Content);
+        Assert.EndsWith(EnvoyRunner.CoverageFallback, reply.Content);
+    }
+
     [Theory]
     [InlineData(403, "gateway_forbidden")]
     [InlineData(422, "tool_free_unavailable")]

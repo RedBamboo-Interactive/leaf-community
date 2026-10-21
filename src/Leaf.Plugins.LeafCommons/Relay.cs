@@ -222,7 +222,14 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
 
     public Task<RelayPostResult> PostAsync(string threadRef, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
     {
-        var body = new { scenario = "consult_reply", threadRef, content, addresses = addresses ?? [], idempotencyKey = idempotencyKey ?? Guid.NewGuid().ToString("N") };
+        return ReplyAsync(threadRef, "consult_reply", content, addresses, idempotencyKey, ct);
+    }
+
+    public Task<RelayPostResult> ReplyAsync(string threadRef, string scenario, string content,
+        IReadOnlyList<string>? addresses = null, string? idempotencyKey = null,
+        CancellationToken ct = default)
+    {
+        var body = new { scenario, threadRef, content, addresses = addresses ?? [], idempotencyKey = idempotencyKey ?? Guid.NewGuid().ToString("N") };
         return PostBodyAsync(body, ct);
     }
 
@@ -330,6 +337,11 @@ public sealed class ConnectorCore(
             var content = frame.TryGetProperty("content", out var contentNode) ? contentNode.GetString() ?? "" : frame.TryGetProperty("reason", out var reason) ? reason.GetString() ?? "owner notice" : "owner notice";
             var kind = type == "ping" && frame.TryGetProperty("scenario", out var scenario) ? scenario.GetString() ?? "consult_reply" : type;
             var sender = frame.TryGetProperty("sender", out var senderNode) ? senderNode.GetRawText() : null;
+            var replyToDisplayName = frame.TryGetProperty("sender", out var replySender)
+                && replySender.ValueKind == JsonValueKind.Object
+                && replySender.TryGetProperty("displayName", out var displayName)
+                && displayName.ValueKind == JsonValueKind.String
+                ? displayName.GetString() : null;
             var channel = frame.TryGetProperty("channel", out var channelNode)
                 && channelNode.ValueKind == JsonValueKind.String
                 ? channelNode.GetString() ?? "" : "";
@@ -342,7 +354,8 @@ public sealed class ConnectorCore(
                     await listeningHandler(new(id, type!, channel, content, sender, thread), ct);
             }
             else
-                await handler(new(thread, kind, content, sender, id, Addressed: type == "ping"), ct);
+                await handler(new(thread, kind, content, sender, id, Addressed: type == "ping",
+                    Channel: channel, ReplyToDisplayName: replyToDisplayName), ct);
         }
         await ack(id);
         return true;

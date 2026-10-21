@@ -132,6 +132,43 @@ public sealed class ContractTests
     }
 
     [Fact]
+    public async Task Text_channel_ping_preserves_message_chain_scenario_channel_and_reply_name()
+    {
+        var runs = new List<EnvoyRunRequest>();
+        var core = new ConnectorCore((request, _) => { runs.Add(request); return Task.CompletedTask; });
+        using var frame = JsonDocument.Parse("""
+            {"type":"ping","id":"live-1644","scenario":"channel_reply",
+             "channel":"showcase","threadRef":"message:1563000000000000000",
+             "sender":{"kind":"human","displayName":"Laurent"},
+             "content":"Hello! What's 2+2?"}
+            """);
+
+        Assert.True(await core.ProcessAsync(frame.RootElement, _ => Task.CompletedTask));
+
+        var run = Assert.Single(runs);
+        Assert.True(run.Addressed);
+        Assert.Equal("channel_reply", run.Kind);
+        Assert.Equal("showcase", run.Channel);
+        Assert.Equal("message:1563000000000000000", run.ThreadRef);
+        Assert.Equal("Laurent", run.ReplyToDisplayName);
+    }
+
+    [Fact]
+    public async Task Relay_channel_reply_request_uses_the_message_chain_and_channel_scenario()
+    {
+        var handler = new CaptureHttpHandler();
+        var relay = new RelayHttpClient(new HttpClient(handler), _ =>
+            Task.FromResult<(Uri, string?)>((new Uri("https://relay.example"), "envoy.secret")));
+
+        await relay.ReplyAsync("message:root-1", "channel_reply", "Replying to Laurent: 4.");
+
+        using var body = JsonDocument.Parse(handler.Body!);
+        Assert.Equal("channel_reply", body.RootElement.GetProperty("scenario").GetString());
+        Assert.Equal("message:root-1", body.RootElement.GetProperty("threadRef").GetString());
+        Assert.Equal("Replying to Laurent: 4.", body.RootElement.GetProperty("content").GetString());
+    }
+
+    [Fact]
     public async Task Relay_profile_sync_never_overwrites_the_relay_owned_avatar_key()
     {
         var handler = new CaptureHttpHandler();

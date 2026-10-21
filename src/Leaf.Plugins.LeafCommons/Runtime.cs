@@ -12,7 +12,7 @@ public sealed class CommonsRuntime(
     public async Task<EnvoyRunResult> HandleAsync(EnvoyRunRequest request, CancellationToken ct = default)
     {
         var settings = await state.GetSettingsAsync(ct);
-        var toggle = request.Kind is "consult_reply" ? "consult" : request.Kind is "bug_report" ? "bug" : request.Kind;
+        var toggle = ToggleFor(request);
         if (settings.ScenarioToggles.TryGetValue(toggle, out var enabled) && !enabled)
         {
             await state.RecordAsync("scenario_disabled", new Dictionary<string, object?> { ["scenario"] = toggle, ["thread"] = request.ThreadRef }, ct);
@@ -33,6 +33,16 @@ public sealed class CommonsRuntime(
         }
         return result;
     }
+
+    private static string ToggleFor(EnvoyRunRequest request) => request.Kind switch
+    {
+        "consult_reply" => "consult",
+        "bug_report" => "bug",
+        "channel_reply" when string.Equals(request.Channel, "showcase", StringComparison.OrdinalIgnoreCase)
+            => "showcase",
+        "channel_reply" => "consult",
+        _ => request.Kind,
+    };
 
     public async Task<BriefPostResult> PostBriefAsync(
         BriefSubmission brief, LeafAgentCaller caller, CancellationToken ct = default)
@@ -169,8 +179,7 @@ public sealed class PublicAgentRuntime(
         var agent = configuration.Agents.FirstOrDefault(item => item.Enabled && string.Equals(
             item.AgentEntityId, agentEntityId, StringComparison.OrdinalIgnoreCase));
         if (agent is null) return new("disabled", 0, "agent_not_public");
-        var toggle = request.Kind is "consult_reply" ? "consult"
-            : request.Kind is "bug_report" ? "bug" : request.Kind;
+        var toggle = ToggleFor(request);
         if (agent.ScenarioToggles.TryGetValue(toggle, out var enabled) && !enabled)
         {
             await state.RecordAsync("scenario_disabled", Metadata(agentEntityId,
@@ -201,6 +210,16 @@ public sealed class PublicAgentRuntime(
         }
         return result;
     }
+
+    private static string ToggleFor(EnvoyRunRequest request) => request.Kind switch
+    {
+        "consult_reply" => "consult",
+        "bug_report" => "bug",
+        "channel_reply" when string.Equals(request.Channel, "showcase", StringComparison.OrdinalIgnoreCase)
+            => "showcase",
+        "channel_reply" => "consult",
+        _ => request.Kind,
+    };
 
     public async Task<BriefPostResult> PostBriefAsync(
         BriefSubmission brief, LeafAgentCaller caller, CancellationToken ct = default)
