@@ -5,7 +5,8 @@ using Leaf.Sdk.Services;
 
 namespace Leaf.Plugins.LeafCommons;
 
-public sealed record CommonsDigest(string Type, string Content, string ThreadRef);
+public sealed record CommonsDigest(string Type, string Content, string ThreadRef,
+    string? AgentEntityId = null);
 
 public sealed class DigestFormatter
 {
@@ -29,17 +30,19 @@ public sealed class CommonsDigestSink(
 {
     public async Task DeliverAsync(CommonsDigest digest, CancellationToken ct = default)
     {
-        var settings = await state.GetSettingsAsync(ct);
+        var settings = await state.GetOwnerSettingsAsync(ct);
         var allowedHosts = settings.LinkAllowlist.Count == 0
             ? DigestFormatter.RelayAllowedHosts
             : settings.LinkAllowlist.Intersect(DigestFormatter.RelayAllowedHosts, StringComparer.OrdinalIgnoreCase).ToArray();
         var content = formatter.Format(digest, allowedHosts);
-        var stored = await state.StoreDigestAsync(digest.Type, content, digest.ThreadRef, ct);
+        var stored = await state.StoreDigestAsync(digest.Type, content, digest.ThreadRef, ct,
+            digest.AgentEntityId);
         await audit.RecordAsync("digest_stored", new Dictionary<string, object?>
         {
             ["digestId"] = stored.Id,
             ["type"] = digest.Type,
             ["thread"] = digest.ThreadRef,
+            ["agent_entity_id"] = digest.AgentEntityId,
             ["size"] = content.Length
         }, ct);
     }
@@ -58,14 +61,16 @@ public sealed class CommonsNovaContextExtension(IPluginExtensions extensions, Co
     public async Task<PluginContextFragment?> ContextAsync(
         PluginContextRequest request, CancellationToken ct)
     {
-        var settings = await state.GetSettingsAsync(ct);
+        var configuration = await state.GetConfigurationAsync(ct);
         if (string.IsNullOrWhiteSpace(request.UserId)
             || string.IsNullOrWhiteSpace(request.AgentId)
-            || !string.Equals(request.UserId, settings.OwnerUserId, StringComparison.Ordinal)
-            || !string.Equals(request.AgentId, settings.AgentEntityId, StringComparison.Ordinal))
+            || !string.Equals(request.UserId, configuration.Owner.OwnerUserId, StringComparison.Ordinal)
+            || !configuration.Agents.Any(agent => agent.Enabled && string.Equals(
+                request.AgentId, agent.AgentEntityId, StringComparison.OrdinalIgnoreCase)))
             return null;
 
-        var unread = await state.ListDigestsAsync(unreadOnly: true, ct);
+        var unread = await state.ListDigestsAsync(unreadOnly: true, ct,
+            agentEntityId: request.AgentId);
         if (unread.Count == 0) return null;
         var shown = unread.Take(MaxDigests).ToArray();
         var content = Render(shown, unread.Count);

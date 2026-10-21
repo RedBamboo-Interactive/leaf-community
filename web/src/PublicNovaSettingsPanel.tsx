@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
 import {
-  Badge,
   Button,
   Dialog,
   DialogContent,
@@ -15,23 +14,28 @@ import {
 
 type Settings = {
   relayBaseUrl: string
+  publicName: string
+  outfitsAvailable: boolean
+  personalWords: string[]
+  canaries: string[]
+  linkAllowlist: string[]
+  ownerUserId?: string
+  agents: AgentSettings[]
+}
+
+type AgentSettings = {
+  agentId: string
+  agentName: string
+  agentAvatarUrl?: string
+  enabled: boolean
   credentialConfigured: boolean
   connectionStatus: string
-  publicName: string
   persona: string
   avatarSource: "agent-avatar" | "outfit"
   avatarSyncStatus: "not-synced" | "pending" | "current" | "synced" | "failed"
   avatarSyncReason?: string
-  avatarSyncedAt?: string
-  outfitsAvailable: boolean
   scenarioToggles: Record<string, boolean>
   shareableFolders: string[]
-  personalWords: string[]
-  canaries: string[]
-  novaDiscussionId?: string
-  linkAllowlist: string[]
-  ownerUserId?: string
-  agentEntityId?: string
 }
 
 const base = "/api/apps/leaf-commons"
@@ -64,15 +68,17 @@ function savePayload(settings: Settings) {
   return {
     relayBaseUrl: settings.relayBaseUrl,
     publicName: settings.publicName,
-    scenarioToggles: settings.scenarioToggles,
-    shareableFolders: settings.shareableFolders,
     personalWords: settings.personalWords,
     canaries: settings.canaries,
-    novaDiscussionId: settings.novaDiscussionId,
     linkAllowlist: settings.linkAllowlist,
     ownerUserId: settings.ownerUserId,
-    agentEntityId: settings.agentEntityId,
-    avatarSource: settings.avatarSource,
+    agents: settings.agents.map((agent) => ({
+      agentId: agent.agentId,
+      enabled: agent.enabled,
+      avatarSource: agent.avatarSource,
+      scenarioToggles: agent.scenarioToggles,
+      shareableFolders: agent.shareableFolders,
+    })),
   }
 }
 
@@ -81,7 +87,7 @@ export function PublicNovaSettingsPanel() {
   const [notice, setNotice] = useState("")
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
-  const [confirmRejoin, setConfirmRejoin] = useState(false)
+  const [confirmRejoin, setConfirmRejoin] = useState<string | null>(null)
 
   const reload = useCallback(async () => {
     try {
@@ -97,6 +103,8 @@ export function PublicNovaSettingsPanel() {
   if (!settings) return <div className="py-8 text-sm text-text-muted">{error || "Loading Public Nova…"}</div>
   const update = <K extends keyof Settings>(key: K, value: Settings[K]) =>
     setSettings({ ...settings, [key]: value })
+  const updateAgent = (agentId: string, change: (agent: AgentSettings) => AgentSettings) =>
+    setSettings({ ...settings, agents: settings.agents.map((agent) => agent.agentId === agentId ? change(agent) : agent) })
 
   async function save() {
     setBusy(true)
@@ -118,13 +126,13 @@ export function PublicNovaSettingsPanel() {
     }
   }
 
-  async function rebuild() {
+  async function rebuild(agent: AgentSettings) {
     setBusy(true)
     setNotice("")
     setError("")
     try {
-      const result = await api<{ copied: number; excluded: unknown[] }>("/shareable/rebuild", { method: "POST" })
-      setNotice(`Shareable copy rebuilt: ${result.copied} copied, ${result.excluded.length} excluded.`)
+      const result = await api<{ copied: number; excluded: unknown[] }>(`/shareable/rebuild?agentId=${encodeURIComponent(agent.agentId)}`, { method: "POST" })
+      setNotice(`${agent.agentName}’s shareable copy: ${result.copied} copied, ${result.excluded.length} excluded.`)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Shareable copy could not be rebuilt")
     } finally {
@@ -132,104 +140,101 @@ export function PublicNovaSettingsPanel() {
     }
   }
 
-  async function rejoin() {
-    setConfirmRejoin(false)
+  async function rejoin(agentId: string) {
+    setConfirmRejoin(null)
     try {
       const saved = await save()
       const callback = `${window.location.origin}${base}/oauth/callback`
-      const result = await api<{ authorizeUrl: string }>(`/oauth/start?callback=${encodeURIComponent(callback)}&scenarios=showcase,consult,open_question,bug&rejoin=${saved.connectionStatus.toLowerCase() === "active"}`)
+      const agent = saved.agents.find((item) => item.agentId === agentId)
+      if (!agent) throw new Error("Agent is no longer available")
+      const result = await api<{ authorizeUrl: string }>(`/oauth/start?callback=${encodeURIComponent(callback)}&agentId=${encodeURIComponent(agentId)}&scenarios=showcase,consult,open_question,bug&rejoin=${agent.connectionStatus.toLowerCase() === "active"}`)
       window.location.assign(result.authorizeUrl)
     } catch {
       // save() owns the visible error.
     }
   }
 
-  const active = settings.connectionStatus.toLowerCase() === "active"
   return <div className="space-y-5">
     <section>
-      <div className="flex items-center justify-between gap-3">
-        <SectionHeader>Public Nova</SectionHeader>
-        <Badge variant={active ? "secondary" : "outline"}>{settings.connectionStatus}</Badge>
-      </div>
+      <SectionHeader>Public Nova</SectionHeader>
       <p className="mb-3 text-xs leading-relaxed text-text-muted">
-        Your Nova’s public side on Discord. Only the material in the shareable copy can be used in public replies.
+        Choose which of your Agents have a public side on Discord. Each Agent keeps its own Envoy credential, avatar, scenarios, and shareable copy.
       </p>
       {(error || notice) && <p aria-live="polite" className={`mb-3 rounded-lg border p-2 text-xs ${error ? "border-destructive-a20 bg-destructive-a10 text-destructive" : "border-primary-a20 bg-primary-a10 text-primary"}`}>{error || notice}</p>}
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4" aria-label="Public Nova status">
-        <Metric label="Relay" value={settings.connectionStatus} destructive={!active} />
-        <Metric label="Credential" value={settings.credentialConfigured ? "Protected" : "Missing"} destructive={!settings.credentialConfigured} />
-        <Metric label="Public name" value={settings.publicName || "Not set"} />
-        <Metric label="Avatar" value={settings.avatarSyncStatus} destructive={settings.avatarSyncStatus === "failed"} />
-      </div>
-      {settings.avatarSyncStatus === "failed" && <p className="mt-2 rounded-lg border border-destructive-a20 bg-destructive-a10 p-2 text-xs text-destructive">
-        Avatar sync failed: {settings.avatarSyncReason ?? "unexpected_error"}. The previous public avatar remains in use.
-      </p>}
     </section>
 
     <section>
-      <SectionHeader>Public identity</SectionHeader>
-      <SettingRow label="Public name" hint="Shown as Nova · name. The relay enforces uniqueness, reserved Discord names, and two changes per 24 hours.">
+      <SectionHeader>Owner settings</SectionHeader>
+      <SettingRow label="Public name" hint="Your shared Discord pseudonym. Agents appear as Agent name · public name.">
         <Input className="h-8 w-full text-xs" minLength={2} maxLength={32} value={settings.publicName} onChange={(event) => update("publicName", event.target.value)} />
       </SettingRow>
-      <SettingRow label="Avatar source" hint="Your current outfit is shared only when you explicitly choose it.">
-        <div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2">
-          <Button size="sm" variant={settings.avatarSource === "agent-avatar" ? "default" : "outline"} onClick={() => update("avatarSource", "agent-avatar")}>Agent avatar</Button>
-          {settings.outfitsAvailable && <Button size="sm" variant={settings.avatarSource === "outfit" ? "default" : "outline"} onClick={() => update("avatarSource", "outfit")}>Current outfit</Button>}
-        </div>
+      <SettingRow label="Relay URL" hint="Shared by all of this owner’s public Agents.">
+        <Input className="h-8 w-full text-xs" value={settings.relayBaseUrl} onChange={(event) => update("relayBaseUrl", event.target.value)} />
       </SettingRow>
-    </section>
-
-    <section>
-      <SectionHeader>Public scenarios</SectionHeader>
-      <div className="divide-y divide-overlay-6">
-        {["showcase", "consult", "open_question", "bug"].map((scenario) => <SettingRow key={scenario} label={scenario.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase())} hint={`Allow ${scenario.replaceAll("_", " ")} conversations on the relay.`}>
-          <Switch checked={settings.scenarioToggles[scenario] ?? true} onCheckedChange={(checked) => update("scenarioToggles", { ...settings.scenarioToggles, [scenario]: checked })} />
-        </SettingRow>)}
-      </div>
-    </section>
-
-    <section>
-      <div className="flex items-center justify-between gap-3">
-        <SectionHeader>Shareable material</SectionHeader>
-        <Button size="sm" variant="outline" disabled={busy} onClick={() => void rebuild()}><i className="ph-bold ph-arrows-clockwise text-xs" />Rebuild copy</Button>
-      </div>
-      <p className="mb-2 text-xs text-text-muted">One local folder per line. Only the filtered staging copy is available to Public Nova.</p>
-      <textarea aria-label="Shareable folders" className={textareaClass} value={settings.shareableFolders.join("\n")} onChange={(event) => update("shareableFolders", lines(event.target.value))} />
-    </section>
-
-    <section>
-      <SectionHeader>Local privacy filters</SectionHeader>
-      <SettingRow label="Personal words" hint="Local-only terms blocked from outbound text. Values stay masked in Settings.">
+      <SettingRow label="Personal words" hint="Owner-level local-only terms blocked from every public Agent.">
         <Input type="password" autoComplete="off" className="h-8 w-full text-xs" value={settings.personalWords.join(", ")} placeholder="Comma-separated" onChange={(event) => update("personalWords", secrets(event.target.value))} />
       </SettingRow>
-      <SettingRow label="Canaries" hint="Local-only alarm strings. Values stay masked and are never sent to the relay.">
+      <SettingRow label="Canaries" hint="Owner-level alarm strings, masked and never sent to the relay.">
         <Input type="password" autoComplete="off" className="h-8 w-full text-xs" value={settings.canaries.join(", ")} placeholder="Comma-separated" onChange={(event) => update("canaries", secrets(event.target.value))} />
       </SettingRow>
     </section>
 
     <section>
-      <SectionHeader>Relay connection</SectionHeader>
-      <SettingRow label="Relay URL" hint="The Nova Commons relay used by this Public Nova connector.">
-        <Input className="h-8 w-full text-xs" value={settings.relayBaseUrl} onChange={(event) => update("relayBaseUrl", event.target.value)} />
-      </SettingRow>
-      <div className="mt-3 flex flex-col gap-2 border-t border-overlay-6 pt-3 sm:flex-row sm:items-center sm:justify-between">
-        <Button disabled={busy} onClick={() => void save()}>{busy && <i className="ph-bold ph-spinner animate-spin text-xs" />}Save settings</Button>
-        <Button variant="outline" size="sm" disabled={busy} className="text-text-muted" onClick={() => setConfirmRejoin(true)}>Re-join relay…</Button>
+      <SectionHeader>Your Agents</SectionHeader>
+      <div className="space-y-3">
+        {settings.agents.map((agent) => <AgentCard key={agent.agentId} agent={agent} outfitsAvailable={settings.outfitsAvailable} busy={busy}
+          onChange={(change) => updateAgent(agent.agentId, change)}
+          onRebuild={() => void rebuild(agent)} onRejoin={() => setConfirmRejoin(agent.agentId)} />)}
+        {settings.agents.length === 0 && <p className="rounded-lg border border-overlay-6 p-3 text-xs text-text-muted">No Agents belong to this owner yet. Public Nova does not require a Nova Agent.</p>}
       </div>
     </section>
 
-    <Dialog open={confirmRejoin} onOpenChange={setConfirmRejoin}>
+    <section className="border-t border-overlay-6 pt-3">
+      <div className="flex justify-end">
+        <Button disabled={busy} onClick={() => void save()}>{busy && <i className="ph-bold ph-spinner animate-spin text-xs" />}Save settings</Button>
+      </div>
+    </section>
+
+    <Dialog open={confirmRejoin !== null} onOpenChange={(open) => { if (!open) setConfirmRejoin(null) }}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Re-join the relay?</DialogTitle>
-          <DialogDescription>This replaces the current Envoy credential and may briefly disconnect Public Nova. Continue only when you intend to re-authorize it.</DialogDescription>
+          <DialogTitle>Re-join this Agent?</DialogTitle>
+          <DialogDescription>This replaces only this Agent’s Envoy credential and briefly disconnects that Agent.</DialogDescription>
         </DialogHeader>
         <div className="flex justify-end gap-2">
-          <Button variant="outline" onClick={() => setConfirmRejoin(false)}>Cancel</Button>
-          <Button variant="destructive" onClick={() => void rejoin()}>Re-join</Button>
+          <Button variant="outline" onClick={() => setConfirmRejoin(null)}>Cancel</Button>
+          <Button variant="destructive" onClick={() => { if (confirmRejoin) void rejoin(confirmRejoin) }}>Re-join</Button>
         </div>
       </DialogContent>
     </Dialog>
+  </div>
+}
+
+function AgentCard({ agent, outfitsAvailable, busy, onChange, onRebuild, onRejoin }: {
+  agent: AgentSettings
+  outfitsAvailable: boolean
+  busy: boolean
+  onChange: (change: (agent: AgentSettings) => AgentSettings) => void
+  onRebuild: () => void
+  onRejoin: () => void
+}) {
+  const set = <K extends keyof AgentSettings>(key: K, value: AgentSettings[K]) =>
+    onChange((current) => ({ ...current, [key]: value }))
+  const active = agent.connectionStatus.toLowerCase() === "active"
+  return <div className="rounded-xl border border-overlay-6 bg-overlay-2 p-3">
+    <div className="flex items-center gap-3">
+      {agent.agentAvatarUrl ? <img className="h-10 w-10 rounded-full object-cover" src={agent.agentAvatarUrl} alt="" /> : <div className="grid h-10 w-10 place-items-center rounded-full bg-overlay-6"><i className="ph ph-user" /></div>}
+      <div className="min-w-0 flex-1"><strong className="block truncate text-sm">{agent.agentName}</strong><span className="block truncate text-[11px] text-text-muted">{agent.agentId}</span></div>
+      <Switch aria-label={`Public on Discord for ${agent.agentName}`} checked={agent.enabled} onCheckedChange={(enabled) => set("enabled", enabled)} />
+    </div>
+    {agent.enabled && <div className="mt-3 space-y-3 border-t border-overlay-6 pt-3">
+      <div className="grid grid-cols-3 gap-2"><Metric label="Connection" value={agent.connectionStatus} destructive={!active} /><Metric label="Credential" value={agent.credentialConfigured ? "Protected" : "Join needed"} destructive={!agent.credentialConfigured} /><Metric label="Avatar" value={agent.avatarSyncStatus} destructive={agent.avatarSyncStatus === "failed"} /></div>
+      {agent.avatarSyncStatus === "failed" && <p className="rounded-lg border border-destructive-a20 bg-destructive-a10 p-2 text-xs text-destructive">Avatar sync failed: {agent.avatarSyncReason ?? "unexpected_error"}.</p>}
+      <SettingRow label="Avatar source" hint="Outfit is shared only when explicitly selected for this Agent."><div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2"><Button size="sm" variant={agent.avatarSource === "agent-avatar" ? "default" : "outline"} onClick={() => set("avatarSource", "agent-avatar")}>Agent avatar</Button>{outfitsAvailable && <Button size="sm" variant={agent.avatarSource === "outfit" ? "default" : "outline"} onClick={() => set("avatarSource", "outfit")}>Current outfit</Button>}</div></SettingRow>
+      <div className="divide-y divide-overlay-6">{["showcase", "consult", "open_question", "bug"].map((scenario) => <SettingRow key={scenario} label={scenario.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase())}><Switch checked={agent.scenarioToggles[scenario] ?? true} onCheckedChange={(checked) => set("scenarioToggles", { ...agent.scenarioToggles, [scenario]: checked })} /></SettingRow>)}</div>
+      <div><div className="mb-2 flex items-center justify-between gap-2"><span className="text-xs font-medium">Shareable folders</span><Button size="sm" variant="outline" disabled={busy} onClick={onRebuild}><i className="ph-bold ph-arrows-clockwise text-xs" />Rebuild copy</Button></div><textarea aria-label={`Shareable folders for ${agent.agentName}`} className={textareaClass} value={agent.shareableFolders.join("\n")} onChange={(event) => set("shareableFolders", lines(event.target.value))} /></div>
+      <div className="flex justify-end"><Button variant="outline" size="sm" disabled={busy} className="text-text-muted" onClick={onRejoin}>{agent.credentialConfigured ? "Re-join relay…" : "Join relay…"}</Button></div>
+    </div>}
   </div>
 }
 

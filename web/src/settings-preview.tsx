@@ -5,27 +5,41 @@ import { PublicNovaSettingsPanel } from "./PublicNovaSettingsPanel"
 
 const settings = {
   relayBaseUrl: "https://nova-commons-relay-lab.example.workers.dev",
-  credentialConfigured: true,
-  connectionStatus: "active",
   publicName: "Laurent",
-  persona: "Nova · Laurent",
-  avatarSource: "outfit",
-  avatarSyncStatus: "synced",
-  avatarSyncedAt: "2026-10-21T13:44:38+02:00",
   outfitsAvailable: true,
-  scenarioToggles: { showcase: true, consult: true, bug: true },
-  shareableFolders: ["T:/Projects/leaf-commons", "T:/Projects/leaf-commons-relay"],
   personalWords: ["example private term"],
   canaries: ["example alarm term"],
   linkAllowlist: [],
   ownerUserId: "owner-preview",
-  agentEntityId: "a7b059ac-f678-8b58-819b-1bcf3acb22db",
+  agents: [{
+    agentId: "a7b059ac-f678-8b58-819b-1bcf3acb22db",
+    agentName: "Nova",
+    enabled: true,
+    credentialConfigured: true,
+    connectionStatus: "active",
+    persona: "Nova · Laurent",
+    avatarSource: "outfit",
+    avatarSyncStatus: "synced",
+    scenarioToggles: { showcase: true, consult: true, open_question: true, bug: true },
+    shareableFolders: ["T:/Projects/leaf-commons", "T:/Projects/leaf-commons-relay"],
+  }, {
+    agentId: "c816c9c9-c2c9-4d59-a2d8-caba898dcfaa",
+    agentName: "Ada",
+    enabled: false,
+    credentialConfigured: false,
+    connectionStatus: "not-public",
+    persona: "Ada · Laurent",
+    avatarSource: "agent-avatar",
+    avatarSyncStatus: "not-synced",
+    scenarioToggles: {},
+    shareableFolders: [],
+  }],
 }
 
 window.fetch = async (input, init) => {
   const url = String(input)
   if (url.endsWith("/settings")) return Response.json(settings)
-  if (url.endsWith("/shareable/rebuild")) return Response.json({ copied: 42, excluded: [] })
+  if (url.includes("/shareable/rebuild")) return Response.json({ copied: 42, excluded: [] })
   if (url.includes("/oauth/start")) return Response.json({ authorizeUrl: "about:blank" })
   return Response.json({ error: `Unexpected preview request: ${url} ${init?.method ?? "GET"}` }, { status: 404 })
 }

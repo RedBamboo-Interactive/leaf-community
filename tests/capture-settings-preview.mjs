@@ -12,7 +12,7 @@ try {
   if (!response?.ok()) throw new Error(`Preview returned HTTP ${response?.status() ?? "unknown"}`)
   await page.waitForTimeout(500)
   if (errors.length > 0) throw new Error(`Preview page error: ${errors.join("; ")}`)
-  await page.getByText("Your Nova’s public side on Discord.", { exact: false }).waitFor({ timeout: 5_000 })
+  await page.getByText("Choose which of your Agents have a public side on Discord.", { exact: false }).waitFor({ timeout: 5_000 })
   await page.screenshot({ path: path.join(scratch, "public-nova-settings-390.png"), fullPage: true })
 } finally {
   await browser.close()

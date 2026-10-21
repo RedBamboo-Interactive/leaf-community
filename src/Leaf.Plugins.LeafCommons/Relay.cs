@@ -10,8 +10,8 @@ namespace Leaf.Plugins.LeafCommons;
 
 public sealed record OAuthExchange(
     string Credential, string Status, string PersonaName, string PublicName,
-    string EnvoyId, string? AvatarObjectKey);
-public sealed record RelayProfile(string PublicName, string PersonaName);
+    string EnvoyId, string? AvatarObjectKey, string? AgentName = null);
+public sealed record RelayProfile(string PublicName, string PersonaName, string? AgentName = null);
 public sealed record RelayThreadSummary(
     string ThreadRef, string ChannelName, string Title, DateTimeOffset LastActivityAt,
     string LastSnippet, bool Unread, string? Scenario);
@@ -31,11 +31,18 @@ public sealed class RelayFeatureUnavailableException(string feature)
 
 public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Task<(Uri BaseUri, string? Credential)>> settings) : IEnvoyRelay, IAvatarUploader
 {
-    public async Task<Uri> BuildAuthorizeUriAsync(Uri callback, IEnumerable<string> scenarios, CancellationToken ct = default)
+    public async Task<Uri> BuildAuthorizeUriAsync(Uri callback, IEnumerable<string> scenarios,
+        CancellationToken ct = default, string? agentEntityId = null, string? agentName = null)
     {
         var (baseUri, _) = await settings(ct).ConfigureAwait(false);
         if (!(callback.Scheme == "leaf" || (callback.Scheme == "http" && callback.IsLoopback))) throw new ArgumentException("OAuth callback must be leaf: or loopback HTTP");
-        return new Uri(baseUri, "/v1/oauth/authorize?connectorRedirectUri=" + Uri.EscapeDataString(callback.ToString()) + "&scenarios=" + Uri.EscapeDataString(string.Join(',', scenarios)));
+        var query = "/v1/oauth/authorize?connectorRedirectUri=" + Uri.EscapeDataString(callback.ToString())
+            + "&scenarios=" + Uri.EscapeDataString(string.Join(',', scenarios));
+        if (!string.IsNullOrWhiteSpace(agentEntityId))
+            query += "&agentEntityId=" + Uri.EscapeDataString(agentEntityId);
+        if (!string.IsNullOrWhiteSpace(agentName))
+            query += "&agentName=" + Uri.EscapeDataString(agentName);
+        return new Uri(baseUri, query);
     }
 
     public async Task<OAuthExchange> ExchangeAsync(string exchangeCode, CancellationToken ct = default)
@@ -51,7 +58,8 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
             : CommonsSettings.PublicNameFromPersona(persona);
         return new(root.GetProperty("credential").GetString()!, envoy.GetProperty("status").GetString()!,
             persona, publicName ?? "", envoy.GetProperty("id").GetString()!,
-            envoy.TryGetProperty("avatarObjectKey", out var avatar) ? avatar.GetString() : null);
+            envoy.TryGetProperty("avatarObjectKey", out var avatar) ? avatar.GetString() : null,
+            String(envoy, "agentName"));
     }
 
     public async Task<RelayProfile> UpdateProfileAsync(
@@ -78,8 +86,33 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
             : publicName;
         var persona = envoy.TryGetProperty("personaName", out var personaName)
             ? personaName.GetString()
-            : $"Nova · {acceptedName}";
-        return new(acceptedName ?? publicName, persona ?? $"Nova · {publicName}");
+            : $"Public Agent · {acceptedName}";
+        return new(acceptedName ?? publicName, persona ?? $"Public Agent · {publicName}");
+    }
+
+    public async Task<RelayProfile> UpdateAgentProfileAsync(
+        string publicName, string agentName, IReadOnlyDictionary<string, bool> scenarioToggles,
+        CancellationToken ct = default)
+    {
+        var (baseUri, credential) = await settings(ct).ConfigureAwait(false);
+        using var response = await SendAuthenticatedAsync(baseUri, credential, HttpMethod.Patch,
+            "/v1/profile", JsonContent.Create(new { publicName, agentName, scenarioToggles }), ct);
+        using var json = await ReadJsonAsync(response, ct);
+        if (!response.IsSuccessStatusCode) throw RelayError(response, json.RootElement, "profile_update_failed");
+        var envoy = json.RootElement.TryGetProperty("envoy", out var wrapped) ? wrapped : json.RootElement;
+        var acceptedName = String(envoy, "publicName") ?? publicName;
+        var acceptedAgentName = String(envoy, "agentName") ?? agentName;
+        var persona = String(envoy, "personaName") ?? $"{acceptedAgentName} · {acceptedName}";
+        return new(acceptedName, persona, acceptedAgentName);
+    }
+
+    public async Task SuspendAsync(CancellationToken ct = default)
+    {
+        using var response = await SendAsync(HttpMethod.Patch, "/v1/profile",
+            JsonContent.Create(new { suspended = true }), ct);
+        using var json = await ReadJsonAsync(response, ct);
+        if (!response.IsSuccessStatusCode)
+            throw RelayError(response, json.RootElement, "envoy_suspend_failed");
     }
 
     public async Task<AvatarUploadResult> UploadAvatarAsync(byte[] bytes, string contentType, CancellationToken ct = default)
@@ -266,7 +299,7 @@ public sealed class ConnectorCore(Func<EnvoyRunRequest, CancellationToken, Task>
 }
 
 public sealed class RelayConnector(Func<CancellationToken, Task<(Uri BaseUri, string? Credential)>> settings, ConnectorCore core,
-    CommonsStateStore state, ILogger<RelayConnector> logger) : IAsyncDisposable
+    Func<string, CancellationToken, Task> setStatus, ILogger<RelayConnector> logger) : IAsyncDisposable
 {
     private readonly SemaphoreSlim single = new(1, 1);
     private CancellationTokenSource? running;
@@ -322,10 +355,6 @@ public sealed class RelayConnector(Func<CancellationToken, Task<(Uri BaseUri, st
 
     private static Task SendAsync(ClientWebSocket ws, string json, CancellationToken ct) => ws.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, ct);
     private async Task SetStatusAsync(string status, CancellationToken ct)
-    {
-        var current = await state.GetSettingsAsync(ct);
-        if (status == "reconnecting" && current.ConnectionStatus == "pending approval") return;
-        if (current.ConnectionStatus != status) await state.SaveSettingsAsync(current with { ConnectionStatus = status }, ct);
-    }
+        => await setStatus(status, ct);
     public async ValueTask DisposeAsync() { if (running is null) return; await running.CancelAsync(); running.Dispose(); running = null; single.Dispose(); }
 }

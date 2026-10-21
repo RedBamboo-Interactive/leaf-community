@@ -38,47 +38,177 @@ public sealed record CommonsSettings(
     public static string PublicNameFromPersona(string? persona)
     {
         var value = persona?.Trim() ?? "";
-        return value.StartsWith("Nova · ", StringComparison.OrdinalIgnoreCase)
-            ? value[7..].Trim()
-            : value;
+        var separator = value.LastIndexOf(" · ", StringComparison.Ordinal);
+        return separator >= 0 ? value[(separator + 3)..].Trim() : value;
     }
 }
 
+public sealed record CommonsOwnerSettings(
+    Guid? EntityId,
+    string RelayBaseUrl,
+    string PublicName,
+    IReadOnlyList<string> PersonalWords,
+    IReadOnlyList<string> Canaries,
+    IReadOnlyList<string> LinkAllowlist,
+    string? OwnerUserId)
+{
+    public object Public(IReadOnlyList<PublicAgentSettings> agents, bool outfitsAvailable) => new
+    {
+        relayBaseUrl = RelayBaseUrl,
+        publicName = PublicName,
+        personalWords = PersonalWords,
+        canaries = Canaries,
+        linkAllowlist = LinkAllowlist,
+        ownerUserId = OwnerUserId,
+        outfitsAvailable,
+        agents = agents.Select(agent => agent.Public()).ToArray(),
+    };
+}
+
+public sealed record PublicAgentSettings(
+    Guid? EntityId,
+    string AgentEntityId,
+    string AgentName,
+    bool Enabled,
+    string? Credential,
+    string ConnectionStatus,
+    string Persona,
+    string? Avatar,
+    IReadOnlyDictionary<string, bool> ScenarioToggles,
+    IReadOnlyList<string> ShareableFolders,
+    string AvatarSource = AvatarSources.AgentAvatar,
+    string? AvatarContentHash = null,
+    string AvatarSyncStatus = "not-synced",
+    string? AvatarSyncReason = null,
+    string? AvatarResolvedAssetId = null,
+    DateTimeOffset? AvatarSyncedAt = null,
+    string? EnvoyId = null)
+{
+    public object Public() => new
+    {
+        agentId = AgentEntityId,
+        agentName = AgentName,
+        enabled = Enabled,
+        credentialConfigured = !string.IsNullOrWhiteSpace(Credential),
+        connectionStatus = ConnectionStatus,
+        persona = Persona,
+        avatar = Avatar,
+        avatarSource = AvatarSource,
+        avatarSyncStatus = AvatarSyncStatus,
+        avatarSyncReason = AvatarSyncReason,
+        avatarResolvedAssetId = AvatarResolvedAssetId,
+        avatarSyncedAt = AvatarSyncedAt,
+        scenarioToggles = ScenarioToggles,
+        shareableFolders = ShareableFolders,
+        envoyId = EnvoyId,
+    };
+}
+
+public sealed record CommonsConfiguration(
+    CommonsOwnerSettings Owner,
+    IReadOnlyList<PublicAgentSettings> Agents);
+
 public sealed record StoredDigest(
     Guid Id, string Type, string Content, string ThreadRef, bool Read,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt, string? AgentEntityId = null);
 
 public sealed record StoredBrief(
     Guid Id, string Kind, string? Title, string ContentHash, string Outcome,
-    string? MessageId, string? Reason, DateTimeOffset CreatedAt);
+    string? MessageId, string? Reason, DateTimeOffset CreatedAt,
+    string? AgentEntityId = null);
 
 public sealed record StoredAudit(
     Guid Id, string Event, JsonObject Metadata, DateTimeOffset CreatedAt);
 
 public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
 {
+    public const string LegacyNovaAgentId = "a7b059ac-f678-8b58-819b-1bcf3acb22db";
     private static readonly TimeSpan OAuthStateLifetime = TimeSpan.FromMinutes(10);
+    private readonly SemaphoreSlim migration = new(1, 1);
+
+    public async Task<CommonsConfiguration> GetConfigurationAsync(CancellationToken ct = default)
+    {
+        await EnsureMultiAgentSchemaAsync(ct);
+        var ownerEntity = await entities.GetBySlugAsync("leaf-commons-settings", "settings", ct);
+        var owner = ownerEntity is null ? DefaultOwner() : OwnerFromEntity(ownerEntity);
+        var found = await entities.QueryAsync(new EntityQuery
+            { TypeSlug = "leaf-commons-public-agent", Limit = 500 }, ct);
+        var agents = found.Select(AgentFromEntity)
+            .OrderBy(x => x.AgentName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(x => x.AgentEntityId, StringComparer.Ordinal)
+            .ToArray();
+        return new(owner, agents);
+    }
+
+    public async Task<CommonsOwnerSettings> GetOwnerSettingsAsync(CancellationToken ct = default)
+        => (await GetConfigurationAsync(ct)).Owner;
+
+    public async Task<IReadOnlyList<PublicAgentSettings>> ListPublicAgentsAsync(
+        bool enabledOnly = false, CancellationToken ct = default)
+    {
+        var agents = (await GetConfigurationAsync(ct)).Agents;
+        return enabledOnly ? agents.Where(x => x.Enabled).ToArray() : agents;
+    }
+
+    public async Task<PublicAgentSettings?> GetPublicAgentAsync(
+        string agentEntityId, CancellationToken ct = default)
+        => (await ListPublicAgentsAsync(ct: ct)).FirstOrDefault(x =>
+            string.Equals(x.AgentEntityId, agentEntityId, StringComparison.OrdinalIgnoreCase));
+
+    public async Task<CommonsOwnerSettings> SaveOwnerSettingsAsync(
+        CommonsOwnerSettings value, CancellationToken ct = default)
+    {
+        var data = OwnerToData(value);
+        var saved = value.EntityId is { } id
+            ? await entities.ReplaceDataAsync(id, data, "Public Agent owner settings", ct)
+            : await entities.UpsertBySlugAsync("leaf-commons-settings", "settings",
+                "Public Agent owner settings", data, ct);
+        return OwnerFromEntity(saved);
+    }
+
+    public async Task<PublicAgentSettings> SavePublicAgentAsync(
+        PublicAgentSettings value, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(value.AgentEntityId))
+            throw new ArgumentException("Public Agent records require an Agent entity ID", nameof(value));
+        var slug = PublicAgentSlug(value.AgentEntityId);
+        var saved = await entities.UpsertBySlugAsync("leaf-commons-public-agent", slug,
+            $"Public Agent: {value.AgentName}", AgentToData(value), ct);
+        return AgentFromEntity(saved);
+    }
 
     public async Task<CommonsSettings> GetSettingsAsync(CancellationToken ct = default)
     {
-        var e = await entities.GetBySlugAsync("leaf-commons-settings", "settings", ct);
-        return e is null ? new(null, "http://127.0.0.1:8787", null, "disconnected", "Nova", null,
-            new Dictionary<string, bool>(), [], [], [], null, []) : FromEntity(e);
+        var configuration = await GetConfigurationAsync(ct);
+        var agent = configuration.Agents.FirstOrDefault(x =>
+                string.Equals(x.AgentEntityId, LegacyNovaAgentId, StringComparison.OrdinalIgnoreCase))
+            ?? configuration.Agents.FirstOrDefault();
+        return ToLegacy(configuration.Owner, agent);
     }
 
     public async Task<CommonsSettings> SaveSettingsAsync(CommonsSettings value, CancellationToken ct = default)
     {
-        var data = ToData(value);
-        var saved = value.EntityId is { } id
-            ? await entities.ReplaceDataAsync(id, data, "Nova Commons Settings", ct)
-            : await entities.UpsertBySlugAsync("leaf-commons-settings", "settings", "Nova Commons Settings", data, ct);
-        return FromEntity(saved);
+        var owner = await SaveOwnerSettingsAsync(new(value.EntityId, value.RelayBaseUrl,
+            value.EffectivePublicName, value.PersonalWords, value.Canaries,
+            value.LinkAllowlist, value.OwnerUserId), ct);
+        var agentId = string.IsNullOrWhiteSpace(value.AgentEntityId)
+            ? LegacyNovaAgentId : value.AgentEntityId;
+        var agent = await SavePublicAgentAsync(new(null, agentId!,
+            string.IsNullOrWhiteSpace(value.Persona) ? "Agent" : AgentNameFromPersona(value.Persona, owner.PublicName),
+            true, value.Credential, value.ConnectionStatus, value.Persona, value.Avatar,
+            value.ScenarioToggles, value.ShareableFolders, value.AvatarSource,
+            value.AvatarContentHash, value.AvatarSyncStatus, value.AvatarSyncReason,
+            value.AvatarResolvedAssetId, value.AvatarSyncedAt, value.EnvoyId), ct);
+        return ToLegacy(owner, agent);
     }
 
     public async Task<StoredBrief> RecordBriefAsync(
         string kind, string? title, string content, string outcome,
-        string? messageId, string? reason, CancellationToken ct = default)
+        string? messageId, string? reason, CancellationToken ct = default,
+        string? agentEntityId = null)
     {
+        agentEntityId ??= (await ListPublicAgentsAsync(enabledOnly: true, ct: ct))
+            .Select(agent => agent.AgentEntityId).SingleOrDefault();
         if (outcome is not ("posted" or "blocked" or "rejected"))
             throw new ArgumentException("Brief outcome must be posted, blocked, or rejected", nameof(outcome));
         var createdAt = DateTimeOffset.UtcNow;
@@ -90,6 +220,7 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
             ["outcome"] = outcome,
             ["message_id"] = messageId,
             ["reason"] = reason,
+            ["agent_entity_id"] = agentEntityId,
             ["created_at"] = createdAt.ToString("O")
         }, ct);
         return ToBrief(brief);
@@ -106,8 +237,11 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
     }
 
     public async Task<StoredDigest> StoreDigestAsync(
-        string type, string content, string threadRef, CancellationToken ct = default)
+        string type, string content, string threadRef, CancellationToken ct = default,
+        string? agentEntityId = null)
     {
+        agentEntityId ??= (await ListPublicAgentsAsync(enabledOnly: true, ct: ct))
+            .Select(agent => agent.AgentEntityId).SingleOrDefault();
         if (type is not ("consult_answer" or "announcement" or "owner_notice"))
             throw new ArgumentException("Unknown digest type", nameof(type));
         if (string.IsNullOrWhiteSpace(content) || content.Length > 1200)
@@ -120,6 +254,7 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
             ["digest_type"] = type,
             ["content"] = content,
             ["thread_ref"] = threadRef,
+            ["agent_entity_id"] = agentEntityId,
             ["read"] = false,
             ["created_at"] = createdAt.ToString("O")
         }, ct);
@@ -127,21 +262,24 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
     }
 
     public async Task<IReadOnlyList<StoredDigest>> ListDigestsAsync(
-        bool unreadOnly = false, CancellationToken ct = default)
+        bool unreadOnly = false, CancellationToken ct = default,
+        string? agentEntityId = null)
     {
         var entitiesFound = await entities.QueryAsync(new EntityQuery
             { TypeSlug = "leaf-commons-digest", Limit = 500 }, ct);
         return entitiesFound.Select(ToDigest)
-            .Where(x => !unreadOnly || !x.Read)
+            .Where(x => (!unreadOnly || !x.Read)
+                && (agentEntityId is null || string.Equals(x.AgentEntityId, agentEntityId,
+                    StringComparison.OrdinalIgnoreCase)))
             .OrderByDescending(x => x.CreatedAt)
             .ThenByDescending(x => x.Id)
             .ToArray();
     }
 
     public async Task<IReadOnlyList<StoredDigest>> ListDigestsForThreadAsync(
-        string threadRef, CancellationToken ct = default)
+        string threadRef, CancellationToken ct = default, string? agentEntityId = null)
     {
-        var all = await ListDigestsAsync(ct: ct);
+        var all = await ListDigestsAsync(ct: ct, agentEntityId: agentEntityId);
         return all.Where(item => string.Equals(item.ThreadRef, threadRef, StringComparison.Ordinal)).ToArray();
     }
 
@@ -164,20 +302,27 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         return ToDigest(entity);
     }
 
-    public async Task<OAuthStateIssue> CreateOAuthStateAsync(string ownerId, bool allowActiveOverwrite, DateTimeOffset? now = null, CancellationToken ct = default)
+    public Task<OAuthStateIssue> CreateOAuthStateAsync(string ownerId, bool allowActiveOverwrite,
+        DateTimeOffset? now = null, CancellationToken ct = default)
+        => CreateOAuthStateAsync(ownerId, LegacyNovaAgentId, allowActiveOverwrite, now, ct);
+
+    public async Task<OAuthStateIssue> CreateOAuthStateAsync(string ownerId, string agentEntityId,
+        bool allowActiveOverwrite, DateTimeOffset? now = null, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(ownerId)) throw new ArgumentException("OAuth state requires an owner", nameof(ownerId));
+        if (!Guid.TryParse(agentEntityId, out _)) throw new ArgumentException("OAuth state requires an Agent entity GUID", nameof(agentEntityId));
         var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
         var slug = OAuthStateSlug(token);
         var issuedAt = now ?? DateTimeOffset.UtcNow;
         await entities.UpsertBySlugAsync("leaf-commons-oauth-state", slug, "Commons OAuth state", new JsonObject
         {
             ["owner_id"] = ownerId,
+            ["agent_entity_id"] = agentEntityId,
             ["expires_at"] = issuedAt.Add(OAuthStateLifetime).ToString("O"),
             ["consumed"] = false,
             ["allow_active_overwrite"] = allowActiveOverwrite
         }, ct);
-        return new(token, issuedAt.Add(OAuthStateLifetime));
+        return new(token, issuedAt.Add(OAuthStateLifetime), agentEntityId);
     }
 
     public async Task<OAuthStateConsumption> ConsumeOAuthStateAsync(string? token, string ownerId, DateTimeOffset? now = null, CancellationToken ct = default)
@@ -194,7 +339,9 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         replacement["consumed_at"] = (now ?? DateTimeOffset.UtcNow).ToString("O");
         var consumed = await entities.CompareExchangeBySlugAsync(entity.TypeSlug, entity.Slug, entity.Name, replacement, entity.UpdatedAt, ct);
         if (consumed is null) return new(OAuthStateStatus.Reused);
-        return new(OAuthStateStatus.Accepted, entity.Data["allow_active_overwrite"]?.GetValue<bool>() == true);
+        return new(OAuthStateStatus.Accepted,
+            entity.Data["allow_active_overwrite"]?.GetValue<bool>() == true,
+            S(entity.Data, "agent_entity_id") ?? LegacyNovaAgentId);
     }
 
     public async Task RecordAsync(string eventName, IReadOnlyDictionary<string, object?> safeMetadata, CancellationToken ct = default)
@@ -203,6 +350,122 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         foreach (var pair in safeMetadata) metadata[pair.Key] = pair.Value is null ? null : JsonSerializer.SerializeToNode(pair.Value);
         await entities.CreateAsync("leaf-commons-audit", eventName, new JsonObject { ["event"] = eventName, ["metadata"] = metadata, ["occurred_at"] = DateTimeOffset.UtcNow }, ct);
     }
+
+    private async Task EnsureMultiAgentSchemaAsync(CancellationToken ct)
+    {
+        await migration.WaitAsync(ct);
+        try
+        {
+            var entity = await entities.GetBySlugAsync("leaf-commons-settings", "settings", ct);
+            if (entity is null || entity.Data["schema_version"]?.GetValue<int?>() == 2) return;
+
+            var legacy = FromEntity(entity);
+            var owner = new CommonsOwnerSettings(entity.Id, legacy.RelayBaseUrl,
+                legacy.EffectivePublicName, legacy.PersonalWords, legacy.Canaries,
+                legacy.LinkAllowlist, legacy.OwnerUserId);
+            var agentId = Guid.TryParse(legacy.AgentEntityId, out var parsed)
+                ? parsed : Guid.Parse(LegacyNovaAgentId);
+            var agentName = AgentNameFromPersona(legacy.Persona, owner.PublicName);
+            await entities.UpsertBySlugAsync("leaf-commons-public-agent", PublicAgentSlug(agentId.ToString()),
+                $"Public Agent: {agentName}", AgentToData(new(null, agentId.ToString(), agentName,
+                    true, legacy.Credential, legacy.ConnectionStatus, legacy.Persona, legacy.Avatar,
+                    legacy.ScenarioToggles, legacy.ShareableFolders, legacy.AvatarSource,
+                    legacy.AvatarContentHash, legacy.AvatarSyncStatus, legacy.AvatarSyncReason,
+                    legacy.AvatarResolvedAssetId, legacy.AvatarSyncedAt, legacy.EnvoyId)), ct);
+            await entities.ReplaceDataAsync(entity.Id, OwnerToData(owner),
+                "Public Agent owner settings", ct);
+        }
+        finally
+        {
+            migration.Release();
+        }
+    }
+
+    private static CommonsOwnerSettings DefaultOwner() => new(null,
+        "http://127.0.0.1:8787", "", [], [], [], null);
+
+    private static CommonsOwnerSettings OwnerFromEntity(LeafEntity entity)
+    {
+        var data = entity.Data;
+        return new(entity.Id, S(data, "relay_base_url") ?? "http://127.0.0.1:8787",
+            S(data, "public_name") ?? "", List(data["personal_words"]),
+            List(data["canaries"]), List(data["link_allowlist"]), S(data, "owner_user_id"));
+    }
+
+    private static JsonObject OwnerToData(CommonsOwnerSettings value) => new()
+    {
+        ["schema_version"] = 2,
+        ["relay_base_url"] = value.RelayBaseUrl,
+        ["public_name"] = value.PublicName,
+        ["personal_words"] = JsonSerializer.SerializeToNode(value.PersonalWords),
+        ["canaries"] = JsonSerializer.SerializeToNode(value.Canaries),
+        ["link_allowlist"] = JsonSerializer.SerializeToNode(value.LinkAllowlist),
+        ["owner_user_id"] = value.OwnerUserId,
+    };
+
+    private static PublicAgentSettings AgentFromEntity(LeafEntity entity)
+    {
+        var data = entity.Data;
+        var agentId = S(data, "agent_entity_id") ?? "";
+        var agentName = S(data, "agent_name") ?? "Agent";
+        return new(entity.Id, agentId, agentName,
+            data["enabled"]?.GetValue<bool?>() == true,
+            S(data, "envoy_credential"), S(data, "connection_status") ?? "disconnected",
+            S(data, "persona") ?? agentName, S(data, "avatar"),
+            Dict(data["scenario_toggles"]), List(data["shareable_folders"]),
+            S(data, "avatar_source") is { } source && AvatarSources.IsValid(source)
+                ? source : AvatarSources.AgentAvatar,
+            S(data, "avatar_content_hash"), S(data, "avatar_sync_status") ?? "not-synced",
+            S(data, "avatar_sync_reason"), S(data, "avatar_resolved_asset_id"),
+            Date(data, "avatar_synced_at"), S(data, "envoy_id"));
+    }
+
+    private static JsonObject AgentToData(PublicAgentSettings value) => new()
+    {
+        ["agent_entity_id"] = value.AgentEntityId,
+        ["agent_name"] = value.AgentName,
+        ["enabled"] = value.Enabled,
+        ["envoy_credential"] = value.Credential,
+        ["connection_status"] = value.ConnectionStatus,
+        ["persona"] = value.Persona,
+        ["avatar"] = value.Avatar,
+        ["scenario_toggles"] = JsonSerializer.SerializeToNode(value.ScenarioToggles),
+        ["shareable_folders"] = JsonSerializer.SerializeToNode(value.ShareableFolders),
+        ["avatar_source"] = value.AvatarSource,
+        ["avatar_content_hash"] = value.AvatarContentHash,
+        ["avatar_sync_status"] = value.AvatarSyncStatus,
+        ["avatar_sync_reason"] = value.AvatarSyncReason,
+        ["avatar_resolved_asset_id"] = value.AvatarResolvedAssetId,
+        ["avatar_synced_at"] = value.AvatarSyncedAt?.ToString("O"),
+        ["envoy_id"] = value.EnvoyId,
+    };
+
+    private static CommonsSettings ToLegacy(CommonsOwnerSettings owner, PublicAgentSettings? agent)
+        => new(owner.EntityId, owner.RelayBaseUrl, agent?.Credential,
+            agent?.ConnectionStatus ?? "disconnected", agent?.Persona ?? "Agent", agent?.Avatar,
+            agent?.ScenarioToggles ?? new Dictionary<string, bool>(),
+            agent?.ShareableFolders ?? [], owner.PersonalWords, owner.Canaries, null,
+            owner.LinkAllowlist, owner.OwnerUserId, agent?.AgentEntityId,
+            agent?.AvatarSource ?? AvatarSources.AgentAvatar, agent?.AvatarContentHash,
+            agent?.AvatarSyncStatus ?? "not-synced", agent?.AvatarSyncReason,
+            agent?.AvatarResolvedAssetId, agent?.AvatarSyncedAt, owner.PublicName, agent?.EnvoyId);
+
+    private static string AgentNameFromPersona(string? persona, string publicName)
+    {
+        var value = persona?.Trim() ?? "";
+        var suffix = " · " + publicName;
+        return suffix.Length > 3 && value.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+            ? value[..^suffix.Length].Trim()
+            : value.Contains(" · ", StringComparison.Ordinal)
+                ? value[..value.IndexOf(" · ", StringComparison.Ordinal)].Trim()
+                : string.IsNullOrWhiteSpace(value) ? "Agent" : value;
+    }
+
+    private static string PublicAgentSlug(string agentId)
+        => Guid.TryParse(agentId, out var parsed)
+            ? "agent-" + parsed.ToString("N")
+            : "agent-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+                agentId.Trim().ToLowerInvariant()))).ToLowerInvariant();
 
     private static CommonsSettings FromEntity(LeafEntity e)
     {
@@ -240,7 +503,8 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
             : entity.CreatedAt;
         return new(entity.Id, S(entity.Data, "digest_type") ?? "owner_notice",
             S(entity.Data, "content") ?? "", S(entity.Data, "thread_ref") ?? "unknown",
-            entity.Data["read"]?.GetValue<bool>() == true, createdAt);
+            entity.Data["read"]?.GetValue<bool>() == true, createdAt,
+            S(entity.Data, "agent_entity_id"));
     }
 
     private static StoredBrief ToBrief(LeafEntity entity)
@@ -255,7 +519,8 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
             ?? (storedOutcome is null ? "pre-immediate-dispatch-history" : null);
         return new(entity.Id, S(entity.Data, "kind") ?? "unknown", S(entity.Data, "title"),
             S(entity.Data, "content_hash") ?? ContentHash(legacyContent ?? ""), outcome,
-            S(entity.Data, "message_id"), reason, createdAt);
+            S(entity.Data, "message_id"), reason, createdAt,
+            S(entity.Data, "agent_entity_id"));
     }
 
     private static StoredAudit ToAudit(LeafEntity entity)
@@ -280,15 +545,24 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
     }
 }
 
-public sealed record OAuthStateIssue(string State, DateTimeOffset ExpiresAt);
+public sealed record OAuthStateIssue(string State, DateTimeOffset ExpiresAt, string? AgentEntityId = null);
 public enum OAuthStateStatus { Accepted, Missing, Unknown, Expired, Reused, OtherUser }
-public sealed record OAuthStateConsumption(OAuthStateStatus Status, bool AllowActiveOverwrite = false);
+public sealed record OAuthStateConsumption(OAuthStateStatus Status, bool AllowActiveOverwrite = false,
+    string? AgentEntityId = null);
 
 public sealed record LeafAgentCaller(string AgentEntityId, string BeneficiaryId);
 
 public static class OwnerGuard
 {
-    public static LeafAgentCaller? ReadPrivateNovaAgent(ClaimsPrincipal user, CommonsSettings settings)
+    public static LeafAgentCaller? ReadPrivateAgent(ClaimsPrincipal user, CommonsOwnerSettings ownerSettings)
+    {
+        var caller = ReadPrivateAgent(user);
+        return caller is not null
+            && string.Equals(ownerSettings.OwnerUserId, caller.BeneficiaryId, StringComparison.Ordinal)
+            ? caller : null;
+    }
+
+    public static LeafAgentCaller? ReadPrivateAgent(ClaimsPrincipal user)
     {
         if (!string.Equals(user.FindFirst("token_use")?.Value, "execution", StringComparison.OrdinalIgnoreCase)) return null;
         var raw = user.FindFirst("execution_identity")?.Value;
@@ -297,7 +571,6 @@ public static class OwnerGuard
         {
             using var document = JsonDocument.Parse(raw);
             var root = document.RootElement;
-            if (root.GetProperty("app").GetProperty("id").GetString() != "nova") return null;
             var actor = root.GetProperty("actor"); var beneficiary = root.GetProperty("beneficiary");
             if (actor.GetProperty("kind").GetString() != "agent" || beneficiary.GetProperty("kind").GetString() != "user") return null;
             var agent = actor.GetProperty("entityId").GetString(); var owner = beneficiary.GetProperty("id").GetString();
@@ -307,10 +580,18 @@ public static class OwnerGuard
                 var kind = context.GetProperty("kind").GetString();
                 hasDiscussion |= kind == "discussion"; hasExternal |= kind == "external-conversation";
             }
-            if (!hasDiscussion || hasExternal || agent is null || owner is null) return null;
-            if (!string.Equals(settings.OwnerUserId, owner, StringComparison.Ordinal) || !string.Equals(settings.AgentEntityId, agent, StringComparison.Ordinal)) return null;
-            return new(agent, owner);
+            return !hasDiscussion || hasExternal || agent is null || owner is null
+                ? null : new(agent, owner);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException) { return null; }
+    }
+
+    public static LeafAgentCaller? ReadPrivateNovaAgent(ClaimsPrincipal user, CommonsSettings settings)
+    {
+        var caller = ReadPrivateAgent(user);
+        return caller is not null
+            && string.Equals(settings.OwnerUserId, caller.BeneficiaryId, StringComparison.Ordinal)
+            && string.Equals(settings.AgentEntityId, caller.AgentEntityId, StringComparison.OrdinalIgnoreCase)
+            ? caller : null;
     }
 }

@@ -3,7 +3,7 @@
   "name": "Public Nova",
   "version": "0.1.0",
   "kernelApi": "^0.1.0",
-  "description": "A private, owner-gated Envoy for the Nova Commons relay.",
+  "description": "Owner-gated, per-Agent public Envoys for Discord through the Commons relay.",
   "icon": "ph-leaf",
   "color": "emerald",
   "requires": ["entities", "assets", "records", "discussions", "nova"],

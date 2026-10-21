@@ -9,7 +9,9 @@ public sealed record PublicThreadItem(
     DateTimeOffset LastActivityAt,
     string LastSnippet,
     bool Unread,
-    string? Scenario);
+    string? Scenario,
+    string? AgentId = null,
+    string? AgentName = null);
 
 public sealed record PublicThreadAuthor(
     string Kind,
@@ -28,7 +30,8 @@ public sealed record PublicThread(
     string ThreadRef,
     string Title,
     string ChannelName,
-    IReadOnlyList<PublicThreadMessage> Messages);
+    IReadOnlyList<PublicThreadMessage> Messages,
+    string? AgentId = null);
 
 public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore state)
 {
@@ -39,7 +42,9 @@ public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore s
         try { remote = await relay.GetThreadsAsync(ct); }
         catch (RelayFeatureUnavailableException) { remote = []; }
 
-        var outcomes = Outcomes(await state.ListAuditsAsync(ct));
+        var outcomes = Outcomes(await state.ListAuditsAsync(ct))
+            .Where(item => item.AgentEntityId is null || string.Equals(item.AgentEntityId,
+                settings.AgentEntityId, StringComparison.OrdinalIgnoreCase)).ToArray();
         var byThread = outcomes.GroupBy(item => item.ThreadRef, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.OrderByDescending(item => item.At).ToArray(), StringComparer.Ordinal);
         var items = remote.Select(item =>
@@ -53,7 +58,8 @@ public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore s
                 latest is not null && latest.At > item.LastActivityAt ? latest.At : item.LastActivityAt,
                 item.LastSnippet,
                 item.Unread,
-                item.Scenario ?? latest?.Scenario);
+                item.Scenario ?? latest?.Scenario, settings.AgentEntityId,
+                AgentName(settings));
         }).ToList();
 
         var remoteRefs = remote.Select(item => item.ThreadRef).ToHashSet(StringComparer.Ordinal);
@@ -61,7 +67,8 @@ public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore s
         {
             var latest = local[0];
             items.Add(new(threadRef, "", threadRef, latest.At,
-                OutcomeSnippet(latest.Outcome, latest.Reason), false, latest.Scenario));
+                OutcomeSnippet(latest.Outcome, latest.Reason), false, latest.Scenario,
+                settings.AgentEntityId, AgentName(settings)));
         }
         return items.OrderByDescending(item => item.LastActivityAt).ToArray();
     }
@@ -78,6 +85,8 @@ public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore s
 
         var audits = Outcomes(await state.ListAuditsAsync(ct))
             .Where(item => string.Equals(item.ThreadRef, threadRef, StringComparison.Ordinal))
+            .Where(item => item.AgentEntityId is null || string.Equals(item.AgentEntityId,
+                settings.AgentEntityId, StringComparison.OrdinalIgnoreCase))
             .ToArray();
         var delivered = audits.Where(item => item.MessageId is not null)
             .GroupBy(item => item.MessageId!, StringComparer.Ordinal)
@@ -103,7 +112,8 @@ public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore s
                 new("self", settings.Persona), "", outcome.Outcome, outcome.Reason));
         }
 
-        foreach (var digest in await state.ListDigestsForThreadAsync(threadRef, ct))
+        foreach (var digest in await state.ListDigestsForThreadAsync(threadRef, ct,
+            settings.AgentEntityId))
         {
             messages.Add(new($"digest-{digest.Id:N}", digest.CreatedAt,
                 new("self", "Public Nova digest"), digest.Content));
@@ -113,7 +123,8 @@ public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore s
         return new(threadRef,
             string.IsNullOrWhiteSpace(summary?.Title) ? threadRef : summary.Title,
             summary?.ChannelName ?? "",
-            messages.OrderBy(item => item.At).ThenBy(item => item.Id, StringComparer.Ordinal).ToArray());
+            messages.OrderBy(item => item.At).ThenBy(item => item.Id, StringComparer.Ordinal).ToArray(),
+            settings.AgentEntityId);
     }
 
     private static IReadOnlyList<LocalOutcome> Outcomes(IReadOnlyList<StoredAudit> audits)
@@ -124,19 +135,20 @@ public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore s
             var thread = String(audit.Metadata, "thread");
             if (string.IsNullOrWhiteSpace(thread)) continue;
             var scenario = String(audit.Metadata, "scenario");
+            var agentEntityId = String(audit.Metadata, "agent_entity_id");
             switch (audit.Event)
             {
                 case "envoy_blocked":
                     items.Add(new(audit.Id, thread, audit.CreatedAt, "blocked",
-                        String(audit.Metadata, "reason") ?? "filter_blocked", null, scenario));
+                        String(audit.Metadata, "reason") ?? "filter_blocked", null, scenario, agentEntityId));
                     break;
                 case "envoy_failed":
                     items.Add(new(audit.Id, thread, audit.CreatedAt, "failed",
-                        String(audit.Metadata, "reason") ?? "unknown_failure", null, scenario));
+                        String(audit.Metadata, "reason") ?? "unknown_failure", null, scenario, agentEntityId));
                     break;
                 case "envoy_done" when String(audit.Metadata, "reason") == "scenario_disabled":
                     items.Add(new(audit.Id, thread, audit.CreatedAt, "blocked",
-                        "scenario_disabled", null, scenario));
+                        "scenario_disabled", null, scenario, agentEntityId));
                     break;
                 case "relay_post":
                     var accepted = Boolean(audit.Metadata, "accepted") == true;
@@ -146,7 +158,7 @@ public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore s
                             ? "fallback"
                             : accepted ? "posted" : "failed",
                         accepted ? null : String(audit.Metadata, "code") ?? "relay_rejected",
-                        String(audit.Metadata, "messageId"), scenario));
+                        String(audit.Metadata, "messageId"), scenario, agentEntityId));
                     break;
             }
         }
@@ -162,7 +174,74 @@ public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore s
     private static bool? Boolean(JsonObject data, string key)
         => data[key] is JsonValue value && value.TryGetValue<bool>(out var result) ? result : null;
 
+    private static string AgentName(CommonsSettings settings)
+    {
+        var separator = settings.Persona.IndexOf(" · ", StringComparison.Ordinal);
+        return separator > 0 ? settings.Persona[..separator] : settings.Persona;
+    }
+
     private sealed record LocalOutcome(
         Guid Id, string ThreadRef, DateTimeOffset At, string Outcome,
-        string? Reason, string? MessageId, string? Scenario);
+        string? Reason, string? MessageId, string? Scenario, string? AgentEntityId);
+}
+
+public sealed class PublicAgentThreads(
+    RelayClientFactory relays, CommonsStateStore state, AgentDirectory directory)
+{
+    public async Task<IReadOnlyList<PublicThreadItem>> ListAsync(
+        string? agentEntityId = null, CancellationToken ct = default)
+    {
+        var configuration = await state.GetConfigurationAsync(ct);
+        var liveNames = string.IsNullOrWhiteSpace(configuration.Owner.OwnerUserId)
+            ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            : (await directory.ListAsync(configuration.Owner.OwnerUserId, ct)).ToDictionary(
+                item => item.AgentEntityId, item => item.Name, StringComparer.OrdinalIgnoreCase);
+        var agents = configuration.Agents.Where(agent => agent.Enabled
+            && (agentEntityId is null || string.Equals(agent.AgentEntityId, agentEntityId,
+                StringComparison.OrdinalIgnoreCase))).ToArray();
+        var result = new List<PublicThreadItem>();
+        foreach (var agent in agents)
+        {
+            var service = new PublicNovaThreads(relays.For(agent.AgentEntityId), state);
+            var items = await service.ListAsync(Legacy(configuration.Owner, agent), ct);
+            result.AddRange(items.Select(item => item with
+            {
+                AgentName = liveNames.GetValueOrDefault(agent.AgentEntityId) ?? agent.AgentName,
+            }));
+        }
+        return result.OrderByDescending(item => item.LastActivityAt).ToArray();
+    }
+
+    public async Task<PublicThread> GetAsync(string threadRef, CancellationToken ct = default)
+    {
+        var configuration = await state.GetConfigurationAsync(ct);
+        var audits = await state.ListAuditsAsync(ct);
+        var agentId = audits.Where(item => item.Metadata["thread"]?.GetValue<string>() == threadRef)
+            .Select(item => item.Metadata["agent_entity_id"]?.GetValue<string>())
+            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+        var candidates = configuration.Agents.Where(agent => agent.Enabled
+            && (agentId is null || string.Equals(agent.AgentEntityId, agentId,
+                StringComparison.OrdinalIgnoreCase))).ToArray();
+        RelayApiException? lastError = null;
+        foreach (var agent in candidates)
+        {
+            try
+            {
+                var service = new PublicNovaThreads(relays.For(agent.AgentEntityId), state);
+                var thread = await service.GetAsync(threadRef, Legacy(configuration.Owner, agent), ct);
+                if (thread.Messages.Count > 0 || candidates.Length == 1) return thread;
+            }
+            catch (RelayApiException error) { lastError = error; }
+        }
+        if (lastError is not null) throw lastError;
+        return new(threadRef, threadRef, "", [], agentId);
+    }
+
+    private static CommonsSettings Legacy(CommonsOwnerSettings owner, PublicAgentSettings agent)
+        => new(owner.EntityId, owner.RelayBaseUrl, agent.Credential, agent.ConnectionStatus,
+            agent.Persona, agent.Avatar, agent.ScenarioToggles, agent.ShareableFolders,
+            owner.PersonalWords, owner.Canaries, null, owner.LinkAllowlist,
+            owner.OwnerUserId, agent.AgentEntityId, agent.AvatarSource, agent.AvatarContentHash,
+            agent.AvatarSyncStatus, agent.AvatarSyncReason, agent.AvatarResolvedAssetId,
+            agent.AvatarSyncedAt, owner.PublicName, agent.EnvoyId);
 }

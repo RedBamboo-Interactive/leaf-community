@@ -40,7 +40,7 @@ public sealed class ContractTests
         Assert.Equal("/ai-session/generate", gateway.RequestUri);
         Assert.False(gateway.HadAuthorizationHeader);
         Assert.False(gateway.HadProvenanceHeader);
-        Assert.Equal("Nova Commons Envoy: thread-1", gateway.JobName);
+        Assert.Equal("Public Agent Envoy: thread-1", gateway.JobName);
         Assert.NotNull(gateway.Provenance);
         Assert.Equal("leaf-commons", gateway.Provenance.Origin.App.Id);
         Assert.Equal("service", gateway.Provenance.Actor.Kind);

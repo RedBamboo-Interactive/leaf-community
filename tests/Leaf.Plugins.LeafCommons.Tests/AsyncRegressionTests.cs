@@ -27,11 +27,14 @@ public sealed class AsyncRegressionTests
             var relay = new RelayHttpClient(new HttpClient(new YieldingJsonHandler()), Settings);
 
             var authorize = await relay.BuildAuthorizeUriAsync(
-                new Uri("leaf://oauth/callback"), ["consult", "bug"]);
+                new Uri("leaf://oauth/callback"), ["consult", "bug"],
+                agentEntityId: "c816c9c9-c2c9-4d59-a2d8-caba898dcfaa", agentName: "Ada");
             var threads = await relay.GetThreadsAsync();
 
             Assert.Equal("https://relay.example/v1/oauth/authorize", authorize.GetLeftPart(UriPartial.Path));
             Assert.Contains("scenarios=consult%2Cbug", authorize.Query);
+            Assert.Contains("agentEntityId=c816c9c9-c2c9-4d59-a2d8-caba898dcfaa", authorize.Query);
+            Assert.Contains("agentName=Ada", authorize.Query);
             Assert.Empty(threads);
             Assert.Equal(dispatcherThread, Environment.CurrentManagedThreadId);
         }).WaitAsync(TimeSpan.FromSeconds(5));

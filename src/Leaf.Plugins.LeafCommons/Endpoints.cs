@@ -5,135 +5,198 @@ using Leaf.Sdk.Services;
 
 namespace Leaf.Plugins.LeafCommons;
 
-public sealed record SettingsUpdate(string RelayBaseUrl, string? Credential, string PublicName,
-    Dictionary<string, bool> ScenarioToggles, string[] ShareableFolders, string[] PersonalWords, string[] Canaries,
-    string? NovaDiscussionId, string[] LinkAllowlist, string? OwnerUserId, string AgentEntityId,
-    string AvatarSource = AvatarSources.AgentAvatar);
+public sealed record PublicAgentUpdate(
+    string AgentId, bool Enabled, string AvatarSource,
+    Dictionary<string, bool> ScenarioToggles, string[] ShareableFolders);
+
+public sealed record SettingsUpdate(
+    string RelayBaseUrl, string PublicName, string[] PersonalWords, string[] Canaries,
+    string[] LinkAllowlist, string? OwnerUserId, PublicAgentUpdate[] Agents);
 
 public static class CommonsEndpoints
 {
     public static void Map(RouteGroupBuilder group)
     {
         group.AddEndpointFilter(async (context, next) => { context.HttpContext.Response.Headers.CacheControl = "private, no-store"; return await next(context); });
-        group.MapGet("/settings", async (IAuthContext auth, CommonsStateStore store, AvatarSyncService avatars, CancellationToken ct) =>
+        group.MapGet("/settings", async (IAuthContext auth, CommonsStateStore store,
+            AgentDirectory directory, PublicAgentAvatarSync avatars, CancellationToken ct) =>
         {
-            var settings = await store.GetSettingsAsync(ct);
-            return IsOwner(auth, settings)
-                ? Results.Ok(settings.Public(await avatars.IsOutfitsAvailableAsync(ct)))
-                : Forbidden();
+            var configuration = await store.GetConfigurationAsync(ct);
+            if (!IsOwner(auth, configuration.Owner)) return Forbidden();
+            var directoryOwner = configuration.Owner.OwnerUserId ?? auth.UserId;
+            var owned = string.IsNullOrWhiteSpace(directoryOwner)
+                ? [] : await directory.ListAsync(directoryOwner, ct);
+            return Results.Ok(SettingsProjection(configuration, owned,
+                await avatars.IsOutfitsAvailableAsync(ct)));
         });
-        group.MapPut("/settings", async (SettingsUpdate update, IAuthContext auth, CommonsStateStore store,
-            RelayHttpClient relayClient, AvatarSyncService avatars, IAvatarImageSource avatarImages, CancellationToken ct) =>
+        group.MapPut("/settings", async (SettingsUpdate update, IAuthContext auth,
+            CommonsStateStore store, AgentDirectory directory, RelayClientFactory relays,
+            PublicAgentAvatarSync avatars, PublicAgentCoordinator coordinator,
+            IAvatarImageSource avatarImages, CancellationToken ct) =>
         {
-            if (!Uri.TryCreate(update.RelayBaseUrl, UriKind.Absolute, out var relay) || relay.Scheme is not ("http" or "https")) return Results.BadRequest(new { error = "invalid_relay_url" });
-            var current = await store.GetSettingsAsync(ct);
-            if (!CanWriteSettings(auth, current, update.OwnerUserId)) return Forbidden();
-            if (await AvatarSources.ValidateAsync(update.AvatarSource, avatarImages, ct) is { } avatarError)
-                return Results.BadRequest(new { error = avatarError });
-            var credential = string.IsNullOrWhiteSpace(update.Credential) ? current.Credential : update.Credential;
-            var avatarChanged = current.AvatarSource != update.AvatarSource
-                || !string.Equals(current.AgentEntityId, update.AgentEntityId, StringComparison.OrdinalIgnoreCase);
-            var profile = new RelayProfile(current.EffectivePublicName, current.Persona);
-            if (!string.IsNullOrWhiteSpace(credential))
+            if (!Uri.TryCreate(update.RelayBaseUrl, UriKind.Absolute, out var relay)
+                || relay.Scheme is not ("http" or "https"))
+                return Results.BadRequest(new { error = "invalid_relay_url" });
+            var configuration = await store.GetConfigurationAsync(ct);
+            if (!CanWriteSettings(auth, configuration.Owner, update.OwnerUserId)) return Forbidden();
+            var ownerId = ResolveOwnerUserId(auth, configuration.Owner, update.OwnerUserId);
+            var owned = (await directory.ListAsync(ownerId, ct)).ToDictionary(
+                agent => agent.AgentEntityId, StringComparer.OrdinalIgnoreCase);
+            foreach (var requested in update.Agents)
             {
-                try
-                {
-                    profile = await relayClient.UpdateProfileAtAsync(relay, credential,
-                        update.PublicName, update.ScenarioToggles, ct);
-                }
-                catch (RelayApiException error)
-                {
-                    return Results.Json(new { error = error.Reason, message = error.Message },
-                        statusCode: error.StatusCode);
-                }
+                if (!owned.ContainsKey(requested.AgentId))
+                    return Results.BadRequest(new { error = "agent_not_owned", agentId = requested.AgentId });
+                if (await AvatarSources.ValidateAsync(requested.AvatarSource, avatarImages, ct) is { } error)
+                    return Results.BadRequest(new { error, agentId = requested.AgentId });
             }
-            else if (!string.Equals(update.PublicName, current.EffectivePublicName, StringComparison.Ordinal))
+
+            var owner = await store.SaveOwnerSettingsAsync(configuration.Owner with
             {
-                return Results.Conflict(new { error = "envoy_credential_missing", message = "Connect Public Nova before changing its public name." });
-            }
-            var saved = await store.SaveSettingsAsync(current with
-            {
-                RelayBaseUrl = relay.ToString(), Credential = credential,
-                PublicName = profile.PublicName, Persona = profile.PersonaName,
-                ScenarioToggles = update.ScenarioToggles, ShareableFolders = update.ShareableFolders,
+                RelayBaseUrl = relay.ToString(), PublicName = update.PublicName,
                 PersonalWords = update.PersonalWords, Canaries = update.Canaries,
-                NovaDiscussionId = update.NovaDiscussionId, LinkAllowlist = update.LinkAllowlist,
-                OwnerUserId = ResolveOwnerUserId(auth, current, update.OwnerUserId),
-                AgentEntityId = update.AgentEntityId, AvatarSource = update.AvatarSource,
-                AvatarContentHash = avatarChanged ? null : current.AvatarContentHash,
-                AvatarSyncStatus = avatarChanged ? "pending" : current.AvatarSyncStatus,
-                AvatarSyncReason = avatarChanged ? null : current.AvatarSyncReason,
-                AvatarResolvedAssetId = avatarChanged ? null : current.AvatarResolvedAssetId,
+                LinkAllowlist = update.LinkAllowlist, OwnerUserId = ownerId,
             }, ct);
-            if (!string.IsNullOrWhiteSpace(saved.Credential))
+            foreach (var requested in update.Agents)
             {
-                try { await avatars.SyncAsync(saved, ct); }
-                catch (AvatarSyncException error)
+                var live = owned[requested.AgentId];
+                var current = await store.GetPublicAgentAsync(requested.AgentId, ct)
+                    ?? new(null, requested.AgentId, live.Name, false, null, "disconnected",
+                        $"{live.Name} · {owner.PublicName}", null, new Dictionary<string, bool>(), []);
+                if (!requested.Enabled && current.Enabled)
                 {
-                    return Results.Json(new { error = "avatar_sync_failed", reason = error.Reason }, statusCode: 422);
+                    await coordinator.SuspendAsync(requested.AgentId, "owner_disabled", ct);
+                    current = await store.GetPublicAgentAsync(requested.AgentId, ct) ?? current;
                 }
-                saved = await store.GetSettingsAsync(ct);
+                var avatarChanged = current.AvatarSource != requested.AvatarSource;
+                var saved = await store.SavePublicAgentAsync(current with
+                {
+                    Enabled = requested.Enabled, AgentName = live.Name,
+                    Persona = $"{live.Name} · {owner.PublicName}",
+                    ScenarioToggles = requested.ScenarioToggles,
+                    ShareableFolders = requested.ShareableFolders,
+                    AvatarSource = requested.AvatarSource,
+                    AvatarContentHash = avatarChanged ? null : current.AvatarContentHash,
+                    AvatarSyncStatus = avatarChanged ? "pending" : current.AvatarSyncStatus,
+                    AvatarSyncReason = avatarChanged ? null : current.AvatarSyncReason,
+                    AvatarResolvedAssetId = avatarChanged ? null : current.AvatarResolvedAssetId,
+                }, ct);
+                if (saved.Enabled && !string.IsNullOrWhiteSpace(saved.Credential))
+                {
+                    try
+                    {
+                        var profile = await relays.For(saved.AgentEntityId).UpdateAgentProfileAsync(
+                            owner.PublicName, live.Name, saved.ScenarioToggles, ct);
+                        if (!string.Equals(owner.PublicName, profile.PublicName, StringComparison.Ordinal))
+                            owner = await store.SaveOwnerSettingsAsync(owner with
+                                { PublicName = profile.PublicName }, ct);
+                        saved = await store.SavePublicAgentAsync(saved with
+                            { AgentName = profile.AgentName ?? live.Name, Persona = profile.PersonaName }, ct);
+                        if (avatarChanged) await avatars.SyncAsync(saved.AgentEntityId, ct);
+                    }
+                    catch (RelayApiException error)
+                    {
+                        return Results.Json(new { error = error.Reason, message = error.Message,
+                            agentId = saved.AgentEntityId }, statusCode: error.StatusCode);
+                    }
+                    catch (AvatarSyncException error)
+                    {
+                        return Results.Json(new { error = "avatar_sync_failed", reason = error.Reason,
+                            agentId = saved.AgentEntityId }, statusCode: 422);
+                    }
+                }
+                await coordinator.RefreshAsync(saved.AgentEntityId, ct);
             }
-            return Results.Ok(saved.Public(await avatars.IsOutfitsAvailableAsync(ct)));
+            configuration = await store.GetConfigurationAsync(ct);
+            return Results.Ok(SettingsProjection(configuration, await directory.ListAsync(ownerId, ct),
+                await avatars.IsOutfitsAvailableAsync(ct)));
         });
-        group.MapGet("/oauth/start", async (string callback, string? scenarios, bool? rejoin, IAuthContext auth, RelayHttpClient relay, CommonsStateStore store, CancellationToken ct) =>
+        group.MapGet("/oauth/start", async (string callback, string agentId, string? scenarios,
+            bool? rejoin, IAuthContext auth, RelayClientFactory relays, CommonsStateStore store,
+            AgentDirectory directory, CancellationToken ct) =>
         {
-            var settings = await store.GetSettingsAsync(ct);
-            if (!IsConfiguredOwner(auth, settings) || string.IsNullOrWhiteSpace(auth.UserId)) return Forbidden();
-            if (IsActive(settings) && rejoin != true) return Results.Conflict(new { error = "active_credential_requires_rejoin" });
-            var oauth = await store.CreateOAuthStateAsync(auth.UserId, rejoin == true, ct: ct);
+            var configuration = await store.GetConfigurationAsync(ct);
+            if (!IsConfiguredOwner(auth, configuration.Owner) || string.IsNullOrWhiteSpace(auth.UserId)) return Forbidden();
+            var publicAgent = await store.GetPublicAgentAsync(agentId, ct);
+            var owned = await directory.GetAsync(agentId, auth.UserId, ct);
+            if (owned is null || publicAgent?.Enabled != true)
+                return Results.BadRequest(new { error = "agent_not_public" });
+            if (IsActive(publicAgent) && rejoin != true)
+                return Results.Conflict(new { error = "active_credential_requires_rejoin" });
+            var oauth = await store.CreateOAuthStateAsync(auth.UserId, agentId,
+                rejoin == true, ct: ct);
             var callbackWithState = AddQuery(callback, "state", oauth.State);
-            return Results.Ok(new { authorizeUrl = await relay.BuildAuthorizeUriAsync(callbackWithState, (scenarios ?? "showcase,consult,open_question,bug").Split(',', StringSplitOptions.RemoveEmptyEntries), ct) });
+            return Results.Ok(new { authorizeUrl = await relays.ForEnrollment(agentId)
+                .BuildAuthorizeUriAsync(callbackWithState,
+                    (scenarios ?? "showcase,consult,open_question,bug").Split(',', StringSplitOptions.RemoveEmptyEntries),
+                    ct, agentId, owned.Name) });
         });
-        group.MapGet("/oauth/callback", async (string exchangeCode, string? state, IAuthContext auth, RelayHttpClient relay,
-            CommonsStateStore store, AvatarSyncService avatars, CancellationToken ct) =>
+        group.MapGet("/oauth/callback", async (string exchangeCode, string? state, IAuthContext auth,
+            RelayClientFactory relays, CommonsStateStore store, AgentDirectory directory,
+            PublicAgentAvatarSync avatars, PublicAgentCoordinator coordinator, CancellationToken ct) =>
         {
-            var before = await store.GetSettingsAsync(ct);
-            if (!IsConfiguredOwner(auth, before) || string.IsNullOrWhiteSpace(auth.UserId)) return Forbidden();
+            var configuration = await store.GetConfigurationAsync(ct);
+            if (!IsConfiguredOwner(auth, configuration.Owner) || string.IsNullOrWhiteSpace(auth.UserId)) return Forbidden();
             var consumed = await store.ConsumeOAuthStateAsync(state, auth.UserId, ct: ct);
             if (consumed.Status != OAuthStateStatus.Accepted) return OAuthStateFailure(consumed.Status);
-            if (!CanCompleteOAuthCallback(before, consumed)) return Results.Conflict(new { error = "active_credential_requires_rejoin" });
-            var exchange = await relay.ExchangeAsync(exchangeCode, ct);
-            var saved = await store.SaveSettingsAsync(before with
+            var agentId = consumed.AgentEntityId ?? CommonsStateStore.LegacyNovaAgentId;
+            var before = await store.GetPublicAgentAsync(agentId, ct);
+            if (before is null || !before.Enabled) return Results.BadRequest(new { error = "agent_not_public" });
+            if (!CanCompleteOAuthCallback(before, consumed))
+                return Results.Conflict(new { error = "active_credential_requires_rejoin" });
+            var owned = await directory.GetAsync(agentId, auth.UserId, ct);
+            if (owned is null) return Results.BadRequest(new { error = "agent_not_owned" });
+            var exchange = await relays.ForEnrollment(agentId).ExchangeAsync(exchangeCode, ct);
+            if (!string.Equals(configuration.Owner.PublicName, exchange.PublicName, StringComparison.Ordinal))
+                await store.SaveOwnerSettingsAsync(configuration.Owner with { PublicName = exchange.PublicName }, ct);
+            var saved = await store.SavePublicAgentAsync(before with
             {
                 Credential = exchange.Credential,
                 ConnectionStatus = exchange.Status == "pending" ? "pending approval" : exchange.Status,
-                Persona = exchange.PersonaName,
-                PublicName = exchange.PublicName,
+                AgentName = exchange.AgentName ?? owned.Name,
+                Persona = string.IsNullOrWhiteSpace(exchange.PersonaName)
+                    ? $"{owned.Name} · {exchange.PublicName}" : exchange.PersonaName,
                 EnvoyId = exchange.EnvoyId,
                 Avatar = exchange.AvatarObjectKey,
                 AvatarContentHash = null,
             }, ct);
-            try { await avatars.SyncAsync(saved, ct); } catch (AvatarSyncException) { }
+            try { await avatars.SyncAsync(saved.AgentEntityId, ct); } catch (AvatarSyncException) { }
+            await coordinator.RefreshAsync(saved.AgentEntityId, ct);
             return Results.Redirect("/extensions/leaf-commons?joined=pending");
         });
-        group.MapGet("/threads", async (IAuthContext auth, CommonsStateStore store,
-            PublicNovaThreads threads, CancellationToken ct) =>
+        group.MapGet("/threads", async (string? agentId, IAuthContext auth, CommonsStateStore store,
+            PublicAgentThreads threads, CancellationToken ct) =>
         {
-            var settings = await store.GetSettingsAsync(ct);
+            var settings = await store.GetOwnerSettingsAsync(ct);
             if (!IsOwner(auth, settings)) return Forbidden();
-            try { return Results.Ok(new { items = await threads.ListAsync(settings, ct) }); }
+            try { return Results.Ok(new { items = await threads.ListAsync(agentId, ct) }); }
             catch (RelayApiException error)
             {
                 return Results.Json(new { error = error.Reason, message = error.Message }, statusCode: error.StatusCode);
             }
         });
         group.MapGet("/threads/{threadRef}", async (string threadRef, IAuthContext auth,
-            CommonsStateStore store, PublicNovaThreads threads, CancellationToken ct) =>
+            CommonsStateStore store, PublicAgentThreads threads, CancellationToken ct) =>
         {
-            var settings = await store.GetSettingsAsync(ct);
+            var settings = await store.GetOwnerSettingsAsync(ct);
             if (!IsOwner(auth, settings)) return Forbidden();
-            try { return Results.Ok(await threads.GetAsync(threadRef, settings, ct)); }
+            try { return Results.Ok(await threads.GetAsync(threadRef, ct)); }
             catch (RelayApiException error)
             {
                 return Results.Json(new { error = error.Reason, message = error.Message }, statusCode: error.StatusCode);
             }
         });
         group.MapPost("/briefs", async (BriefSubmission request, HttpContext http,
-            CommonsStateStore store, CommonsRuntime runtime, CancellationToken ct) =>
+            CommonsStateStore store, AgentDirectory directory, PublicAgentRuntime runtime,
+            CancellationToken ct) =>
         {
-            var settings = await store.GetSettingsAsync(ct); var caller = OwnerGuard.ReadPrivateNovaAgent(http.User, settings);
+            var configuration = await store.GetConfigurationAsync(ct);
+            var caller = OwnerGuard.ReadPrivateAgent(http.User, configuration.Owner);
             if (caller is null) return Results.Json(new { error = "owner_agent_required" }, statusCode: 403);
+            var publicAgent = configuration.Agents.FirstOrDefault(agent => agent.Enabled
+                && string.Equals(agent.AgentEntityId, caller.AgentEntityId, StringComparison.OrdinalIgnoreCase));
+            if (publicAgent is null || await directory.GetAsync(caller.AgentEntityId,
+                    caller.BeneficiaryId, ct) is null)
+                return Results.Json(new { error = "agent_not_public" }, statusCode: 403);
             try
             {
                 var result = await runtime.PostBriefAsync(request, caller, ct);
@@ -144,31 +207,38 @@ public static class CommonsEndpoints
         });
         group.MapGet("/briefs", async (IAuthContext auth, CommonsStateStore store, CancellationToken ct) =>
         {
-            var settings = await store.GetSettingsAsync(ct);
+            var settings = await store.GetOwnerSettingsAsync(ct);
             return IsOwner(auth, settings)
                 ? Results.Ok(new { items = await store.ListBriefsAsync(ct) })
                 : Forbidden();
         });
         group.MapGet("/digests", async (IAuthContext auth, CommonsStateStore store, CancellationToken ct) =>
         {
-            var settings = await store.GetSettingsAsync(ct);
+            var settings = await store.GetOwnerSettingsAsync(ct);
             if (!IsOwner(auth, settings)) return Forbidden();
             return Results.Ok(new { items = await store.ListDigestsAsync(ct: ct) });
         });
         group.MapPost("/digests/{id:guid}/read", async (Guid id, IAuthContext auth, CommonsStateStore store, CancellationToken ct) =>
         {
-            var settings = await store.GetSettingsAsync(ct);
+            var settings = await store.GetOwnerSettingsAsync(ct);
             if (!IsOwner(auth, settings)) return Forbidden();
             try { return Results.Ok(await store.MarkDigestReadAsync(id, ct)); }
             catch (KeyNotFoundException) { return Results.NotFound(new { error = "digest_not_found" }); }
         });
         group.MapPost("/briefs/{id:guid}/decision", (Guid id) =>
             Results.Json(new { error = "brief_decision_removed" }, statusCode: StatusCodes.Status410Gone));
-        group.MapPost("/shareable/rebuild", async (IAuthContext auth, CommonsStateStore store, ShareableSetBuilder builder, ShareableStore shareable, CancellationToken ct) =>
+        group.MapPost("/shareable/rebuild", async (string agentId, IAuthContext auth,
+            CommonsStateStore store, ShareableSetBuilder builder, AgentShareableStores shareables,
+            CancellationToken ct) =>
         {
-            var settings = await store.GetSettingsAsync(ct); if (!IsOwner(auth, settings)) return Forbidden();
-            var result = await builder.BuildAsync(settings.ShareableFolders, shareable.RootPath, ct);
-            await store.RecordAsync("shareable_rebuilt", new Dictionary<string, object?> { ["copied"] = result.Copied, ["excluded"] = result.Excluded.Count }, ct);
+            var owner = await store.GetOwnerSettingsAsync(ct); if (!IsOwner(auth, owner)) return Forbidden();
+            var settings = await store.GetPublicAgentAsync(agentId, ct);
+            if (settings is null || !settings.Enabled) return Results.BadRequest(new { error = "agent_not_public" });
+            var result = await builder.BuildAsync(settings.ShareableFolders,
+                shareables.For(agentId).RootPath, ct);
+            await store.RecordAsync("shareable_rebuilt", new Dictionary<string, object?>
+                { ["agent_entity_id"] = agentId, ["copied"] = result.Copied,
+                    ["excluded"] = result.Excluded.Count }, ct);
             return Results.Ok(result);
         });
     }
@@ -188,12 +258,73 @@ public static class CommonsEndpoints
         return settings.OwnerUserId ?? auth.UserId!;
     }
 
+    public static bool CanWriteSettings(IAuthContext auth, CommonsOwnerSettings settings,
+        string? requestedOwnerId)
+    {
+        if (auth.IsInRole("admin")) return !string.IsNullOrWhiteSpace(auth.UserId);
+        return !string.IsNullOrWhiteSpace(auth.UserId)
+            && string.Equals(auth.UserId, settings.OwnerUserId, StringComparison.Ordinal)
+            && (string.IsNullOrWhiteSpace(requestedOwnerId)
+                || string.Equals(requestedOwnerId, settings.OwnerUserId, StringComparison.Ordinal));
+    }
+
+    public static string ResolveOwnerUserId(IAuthContext auth, CommonsOwnerSettings settings,
+        string? requestedOwnerId)
+    {
+        if (!CanWriteSettings(auth, settings, requestedOwnerId))
+            throw new UnauthorizedAccessException("Only an admin may initialize or change ownership");
+        if (auth.IsInRole("admin") && !string.IsNullOrWhiteSpace(requestedOwnerId)) return requestedOwnerId;
+        return settings.OwnerUserId ?? auth.UserId!;
+    }
+
     public static bool CanCompleteOAuthCallback(CommonsSettings settings, OAuthStateConsumption state) =>
         state.Status == OAuthStateStatus.Accepted && (!IsActive(settings) || state.AllowActiveOverwrite);
 
+    public static bool CanCompleteOAuthCallback(PublicAgentSettings settings, OAuthStateConsumption state) =>
+        state.Status == OAuthStateStatus.Accepted && (!IsActive(settings) || state.AllowActiveOverwrite);
+
     private static bool IsOwner(IAuthContext auth, CommonsSettings settings) => auth.IsInRole("admin") || IsConfiguredOwner(auth, settings);
+    private static bool IsOwner(IAuthContext auth, CommonsOwnerSettings settings) => auth.IsInRole("admin") || IsConfiguredOwner(auth, settings);
     private static bool IsConfiguredOwner(IAuthContext auth, CommonsSettings settings) => !string.IsNullOrWhiteSpace(auth.UserId) && string.Equals(auth.UserId, settings.OwnerUserId, StringComparison.Ordinal);
+    private static bool IsConfiguredOwner(IAuthContext auth, CommonsOwnerSettings settings) => !string.IsNullOrWhiteSpace(auth.UserId) && string.Equals(auth.UserId, settings.OwnerUserId, StringComparison.Ordinal);
     private static bool IsActive(CommonsSettings settings) => !string.IsNullOrWhiteSpace(settings.Credential) && string.Equals(settings.ConnectionStatus, "active", StringComparison.OrdinalIgnoreCase);
+    private static bool IsActive(PublicAgentSettings settings) => !string.IsNullOrWhiteSpace(settings.Credential) && string.Equals(settings.ConnectionStatus, "active", StringComparison.OrdinalIgnoreCase);
+
+    private static object SettingsProjection(CommonsConfiguration configuration,
+        IReadOnlyList<OwnedAgent> ownedAgents, bool outfitsAvailable)
+    {
+        var configured = configuration.Agents.ToDictionary(
+            agent => agent.AgentEntityId, StringComparer.OrdinalIgnoreCase);
+        return new
+        {
+            relayBaseUrl = configuration.Owner.RelayBaseUrl,
+            publicName = configuration.Owner.PublicName,
+            personalWords = configuration.Owner.PersonalWords,
+            canaries = configuration.Owner.Canaries,
+            linkAllowlist = configuration.Owner.LinkAllowlist,
+            ownerUserId = configuration.Owner.OwnerUserId,
+            outfitsAvailable,
+            agents = ownedAgents.Select(agent =>
+            {
+                configured.TryGetValue(agent.AgentEntityId, out var value);
+                return new
+                {
+                    agentId = agent.AgentEntityId,
+                    agentName = agent.Name,
+                    agentAvatarUrl = agent.AvatarUrl,
+                    enabled = value?.Enabled == true,
+                    credentialConfigured = !string.IsNullOrWhiteSpace(value?.Credential),
+                    connectionStatus = value?.ConnectionStatus ?? "not-public",
+                    persona = value?.Persona ?? $"{agent.Name} · {configuration.Owner.PublicName}",
+                    avatarSource = value?.AvatarSource ?? AvatarSources.AgentAvatar,
+                    avatarSyncStatus = value?.AvatarSyncStatus ?? "not-synced",
+                    avatarSyncReason = value?.AvatarSyncReason,
+                    scenarioToggles = value?.ScenarioToggles ?? new Dictionary<string, bool>(),
+                    shareableFolders = value?.ShareableFolders ?? [],
+                };
+            }).ToArray(),
+        };
+    }
     private static Uri AddQuery(string callback, string name, string value)
     {
         var uri = new Uri(callback, UriKind.Absolute);
