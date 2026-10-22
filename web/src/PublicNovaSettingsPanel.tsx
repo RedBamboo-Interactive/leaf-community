@@ -11,6 +11,7 @@ import {
   SettingRow,
   Switch,
 } from "@redbamboo/ui"
+import { agentConnectionLabel, relayTargetLabel } from "./agent-row"
 
 type Settings = {
   relayBaseUrl: string
@@ -187,6 +188,7 @@ export function PublicNovaSettingsPanel() {
       <SectionHeader>Your Agents</SectionHeader>
       <div className="space-y-3">
         {settings.agents.map((agent) => <AgentCard key={agent.agentId} agent={agent} outfitsAvailable={settings.outfitsAvailable} busy={busy}
+          relayTarget={relayTargetLabel(settings.relayBaseUrl)}
           onChange={(change) => updateAgent(agent.agentId, change)}
           onRebuild={() => void rebuild(agent)} onRejoin={() => setConfirmRejoin(agent.agentId)} />)}
         {settings.agents.length === 0 && <p className="rounded-lg border border-overlay-6 p-3 text-xs text-text-muted">No owner-usable Agents are available yet.</p>}
@@ -214,8 +216,9 @@ export function PublicNovaSettingsPanel() {
   </div>
 }
 
-function AgentCard({ agent, outfitsAvailable, busy, onChange, onRebuild, onRejoin }: {
+function AgentCard({ agent, relayTarget, outfitsAvailable, busy, onChange, onRebuild, onRejoin }: {
   agent: AgentSettings
+  relayTarget: string
   outfitsAvailable: boolean
   busy: boolean
   onChange: (change: (agent: AgentSettings) => AgentSettings) => void
@@ -225,10 +228,15 @@ function AgentCard({ agent, outfitsAvailable, busy, onChange, onRebuild, onRejoi
   const set = <K extends keyof AgentSettings>(key: K, value: AgentSettings[K]) =>
     onChange((current) => ({ ...current, [key]: value }))
   const active = agent.connectionStatus.toLowerCase() === "active"
+  const connection = agentConnectionLabel(agent.enabled, agent.connectionStatus)
   return <div className="rounded-xl border border-overlay-6 bg-overlay-2 p-3">
-    <div className="flex items-center gap-3">
+    <div className="flex items-center gap-3" title={`Agent ID: ${agent.agentId}`}>
       {agent.agentAvatarUrl ? <img className="h-10 w-10 rounded-full object-cover" src={agent.agentAvatarUrl} alt="" /> : <div className="grid h-10 w-10 place-items-center rounded-full bg-overlay-6"><i className="ph ph-user" /></div>}
-      <div className="min-w-0 flex-1"><strong className="block truncate text-sm">{agent.agentName}</strong><span className="block truncate text-[11px] text-text-muted">{agent.agentId}</span></div>
+      <div className="min-w-0 flex-1">
+        <strong className="block truncate text-sm">{agent.agentName}</strong>
+        <span className="block truncate text-[11px] text-text-muted">{agent.persona}</span>
+        <span className={`block truncate text-[11px] ${connection === "Error" ? "text-destructive" : "text-text-muted"}`}>{relayTarget} · {connection}</span>
+      </div>
       <Switch aria-label={`Public on Discord for ${agent.agentName}`} checked={agent.enabled} onCheckedChange={(enabled) => set("enabled", enabled)} />
     </div>
     {agent.enabled && <div className="mt-3 space-y-3 border-t border-overlay-6 pt-3">

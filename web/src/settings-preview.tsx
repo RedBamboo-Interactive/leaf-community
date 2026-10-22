@@ -5,7 +5,7 @@ import { PublicNovaSettingsPanel } from "./PublicNovaSettingsPanel"
 
 const settings = {
   relayBaseUrl: "https://nova-commons-relay-lab.example.workers.dev",
-  publicName: "Laurent",
+  publicName: "Lynial",
   outfitsAvailable: true,
   personalWords: ["example private term"],
   canaries: ["example alarm term"],
@@ -17,7 +17,7 @@ const settings = {
     enabled: true,
     credentialConfigured: true,
     connectionStatus: "active",
-    persona: "Nova · Laurent",
+    persona: "Nova · Lynial",
     avatarSource: "outfit",
     avatarSyncStatus: "synced",
     scenarioToggles: { showcase: true, consult: true, open_question: true, bug: true },
@@ -28,7 +28,7 @@ const settings = {
     enabled: false,
     credentialConfigured: false,
     connectionStatus: "not-public",
-    persona: "Ada · Laurent",
+    persona: "Ada · Lynial",
     avatarSource: "agent-avatar",
     avatarSyncStatus: "not-synced",
     scenarioToggles: {},

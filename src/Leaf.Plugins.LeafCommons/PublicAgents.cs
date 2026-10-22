@@ -34,10 +34,10 @@ public sealed class AgentDirectory(IEntityStore entities)
     internal static bool OwnedBy(LeafEntity entity, string ownerUserId)
     {
         // Agent entities created before account-backed ownership use local-user for
-        // the installation owner. Discord and Nova both treat that subject as the
-        // locally usable owner identity. An explicit owner_id wins so a plugin may
-        // deliberately expose an Agent, while plugin/system Agents are otherwise
-        // never inferred to belong to the owner.
+        // the installation owner. Plugin-owned Agents carry the kernel's canonical
+        // owner_plugin scope stamp and belong to their project/application even when
+        // that plugin also records the human owner_id.
+        if (!string.IsNullOrWhiteSpace(Text(entity.Data, "owner_plugin"))) return false;
         var explicitOwner = Text(entity.Data, "owner_id");
         if (!string.IsNullOrWhiteSpace(explicitOwner))
             return IsOwnerSubject(explicitOwner, ownerUserId);
