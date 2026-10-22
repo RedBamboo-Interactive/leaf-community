@@ -83,7 +83,8 @@ public sealed record PublicAgentSettings(
     string? AvatarSyncReason = null,
     string? AvatarResolvedAssetId = null,
     DateTimeOffset? AvatarSyncedAt = null,
-    string? EnvoyId = null)
+    string? EnvoyId = null,
+    bool RestrictedMode = false)
 {
     public string DisplayPersona(string publicName) => $"{AgentName} \u00b7 {publicName}";
 
@@ -104,6 +105,7 @@ public sealed record PublicAgentSettings(
         scenarioToggles = ScenarioToggles,
         shareableFolders = ShareableFolders,
         envoyId = EnvoyId,
+        restrictedMode = RestrictedMode,
     };
 }
 
@@ -429,7 +431,8 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
                 ? source : AvatarSources.AgentAvatar,
             S(data, "avatar_content_hash"), S(data, "avatar_sync_status") ?? "not-synced",
             S(data, "avatar_sync_reason"), S(data, "avatar_resolved_asset_id"),
-            Date(data, "avatar_synced_at"), S(data, "envoy_id"));
+            Date(data, "avatar_synced_at"), S(data, "envoy_id"),
+            data["restricted_mode"]?.GetValue<bool?>() == true);
     }
 
     private static JsonObject AgentToData(PublicAgentSettings value) => new()
@@ -449,6 +452,7 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         ["avatar_resolved_asset_id"] = value.AvatarResolvedAssetId,
         ["avatar_synced_at"] = value.AvatarSyncedAt?.ToString("O"),
         ["envoy_id"] = value.EnvoyId,
+        ["restricted_mode"] = value.RestrictedMode,
     };
 
     private static CommonsSettings ToLegacy(CommonsOwnerSettings owner, PublicAgentSettings? agent)

@@ -4,6 +4,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Leaf.Sdk.Services;
 using Microsoft.Extensions.Logging;
 
 namespace Leaf.Plugins.LeafCommons;
@@ -345,6 +346,7 @@ public sealed class ConnectorCore(
             var channel = frame.TryGetProperty("channel", out var channelNode)
                 && channelNode.ValueKind == JsonValueKind.String
                 ? channelNode.GetString() ?? "" : "";
+            var attachments = ParseAttachments(frame);
             var listeningOnly = type == "owner_notice" || (type == "event"
                 && (string.IsNullOrWhiteSpace(thread)
                     || string.Equals(channel, "announcements", StringComparison.OrdinalIgnoreCase)));
@@ -355,11 +357,38 @@ public sealed class ConnectorCore(
             }
             else
                 await handler(new(thread, kind, content, sender, id, Addressed: type == "ping",
-                    Channel: channel, ReplyToDisplayName: replyToDisplayName), ct);
+                    Channel: channel, ReplyToDisplayName: replyToDisplayName,
+                    Attachments: attachments), ct);
         }
         await ack(id);
         return true;
     }
+
+    private static IReadOnlyList<ExternalConversationAttachment> ParseAttachments(JsonElement frame)
+    {
+        if (!frame.TryGetProperty("attachments", out var values)
+            || values.ValueKind != JsonValueKind.Array) return [];
+        var result = new List<ExternalConversationAttachment>();
+        foreach (var item in values.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) continue;
+            var id = Text(item, "id");
+            var name = Text(item, "name");
+            var mediaType = Text(item, "mediaType") ?? Text(item, "media_type");
+            var sha256 = Text(item, "sha256");
+            var scopeToken = Text(item, "scopeToken") ?? Text(item, "scope_token");
+            var size = item.TryGetProperty("size", out var sizeNode)
+                && sizeNode.TryGetInt64(out var parsedSize) ? parsedSize : -1;
+            if (id is null || name is null || mediaType is null || sha256 is null
+                || scopeToken is null || size < 0) continue;
+            result.Add(new(id, name, mediaType, size, sha256, scopeToken));
+        }
+        return result;
+    }
+
+    private static string? Text(JsonElement element, string name)
+        => element.TryGetProperty(name, out var value)
+            && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 }
 
 public sealed class RelayConnector(Func<CancellationToken, Task<(Uri BaseUri, string? Credential)>> settings, ConnectorCore core,

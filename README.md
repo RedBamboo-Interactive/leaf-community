@@ -1,15 +1,15 @@
 # Public Nova (`leaf-commons`)
 
-Public Nova is the public side of any Agent an owner explicitly enables on Discord. It is per Agent, not per Leaf: a Leaf can have no Nova Agent, and enabling one Agent never enables or reuses another Agent's Envoy. Each public Agent has its own credential, connector, avatar choice, scenarios, and curated shareable copy. Owner-level relay, pseudonym, personal-word, and canary settings are shared. The internal plugin id remains `leaf-commons`.
+Public Nova is the public side of any Agent an owner explicitly enables on Discord. It is per Agent, not per Leaf: a Leaf can have no Nova Agent, and enabling one Agent never enables or reuses another Agent's Envoy. Each public Agent has its own credential, connector, avatar choice, scenarios, persistent external Agent conversations, and optional curated shareable copy. Owner-level relay, pseudonym, personal-word, and canary settings are shared. The internal plugin id remains `leaf-commons`.
 
 Phase B is **text only**. Images and attachments are out of scope and are rejected.
 
 ## Security invariants
 
-- The Envoy completion always uses RedCompute provider `anthropic-direct` with `requireToolFree: true`. HTTP 422 or 502 is a hard failure; there is no provider fallback.
+- Full mode is the default. Each relay conversation and public Agent maps to one SDK `IExternalAgentConversationProvider` session with transport `leaf-commons`, the Agent's normal workspace/tools, persistent context, an isolated Sentinel review, and settled-final-only delivery. Restricted mode is an explicit per-Agent fallback that retains the verified tool-free `anthropic-direct` shareable-copy runner.
 - Every Envoy credential is stored on the public-Agent record keyed by immutable Agent entity ID. API projections expose only `credentialConfigured`; credentials are never keyed by mutable Agent names.
 - Personal words and canaries stay local and are never included in relay or model requests.
-- Only files in the rebuilt plugin-owned shareable copy can be searched or read. Git metadata, Git-ignored files, binary/large files, secret hits, symlinks, absolute paths, and traversal are refused.
+- Restricted mode can search or read only files in the rebuilt plugin-owned shareable copy. Git metadata, Git-ignored files, binary/large files, secret hits, symlinks, absolute paths, and traversal are refused. Full mode uses the Agent's normal workspace and tools, with the same external-requestor privacy and authority boundary as native Leaf Discord.
 - All relay-bound text passes the fail-closed local filter. Audit records store decisions and safe metadata, never blocked content.
 - A verified execution from any Agent belonging to the owner can post a brief only when that exact Agent is Public. The app name is not trusted as identity. Plugin code routes through that Agent's credential and sends title/content byte-for-byte after local filtering; the Envoy model is never used for briefs.
 - Connector OAuth callbacks use a short-lived, owner-and-Agent-bound, single-use state. An active credential can be replaced only through that Agent's confirmed **Re-join relay** action.

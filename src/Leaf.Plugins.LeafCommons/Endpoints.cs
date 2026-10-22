@@ -7,7 +7,8 @@ namespace Leaf.Plugins.LeafCommons;
 
 public sealed record PublicAgentUpdate(
     string AgentId, bool Enabled, string AvatarSource,
-    Dictionary<string, bool> ScenarioToggles, string[] ShareableFolders);
+    Dictionary<string, bool> ScenarioToggles, string[] ShareableFolders,
+    bool RestrictedMode = false);
 
 public sealed record SettingsUpdate(
     string RelayBaseUrl, string PublicName, string[] PersonalWords, string[] Canaries,
@@ -102,6 +103,7 @@ public static class CommonsEndpoints
                     Enabled = requested.Enabled, AgentName = live.Name,
                     ScenarioToggles = requested.ScenarioToggles,
                     ShareableFolders = requested.ShareableFolders,
+                    RestrictedMode = requested.RestrictedMode,
                     AvatarSource = requested.AvatarSource,
                     AvatarContentHash = avatarChanged ? null : current.AvatarContentHash,
                     AvatarSyncStatus = avatarChanged ? "pending" : current.AvatarSyncStatus,
@@ -222,6 +224,17 @@ public static class CommonsEndpoints
             {
                 return Results.Json(new { error = error.Reason, message = error.Message }, statusCode: error.StatusCode);
             }
+        });
+        group.MapPost("/threads/{threadRef}/clear", async (string threadRef, string agentId,
+            IAuthContext auth, CommonsStateStore store,
+            PublicAgentConversationCoordinator conversations, CancellationToken ct) =>
+        {
+            var owner = await store.GetOwnerSettingsAsync(ct);
+            if (!IsOwner(auth, owner)) return Forbidden();
+            var cleared = await conversations.ClearAsync(agentId, threadRef, ct);
+            return cleared is null
+                ? Results.NotFound(new { error = "public_conversation_not_found" })
+                : Results.Ok(new { cleared.Generation, cleared.SessionId });
         });
         group.MapPost("/briefs", async (BriefSubmission request, HttpContext http,
             CommonsStateStore store, AgentDirectory directory, PublicAgentRuntime runtime,
@@ -366,6 +379,7 @@ public static class CommonsEndpoints
                     avatarSyncReason = value?.AvatarSyncReason,
                     scenarioToggles = value?.ScenarioToggles ?? new Dictionary<string, bool>(),
                     shareableFolders = value?.ShareableFolders ?? [],
+                    restrictedMode = value?.RestrictedMode ?? false,
                 };
             }).ToArray(),
         };

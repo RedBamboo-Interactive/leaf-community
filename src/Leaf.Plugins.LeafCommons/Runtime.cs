@@ -142,7 +142,8 @@ public sealed class PublicAgentRuntime(
     RelayClientFactory relays,
     OutboundFilter filter,
     CommonsStateStore state,
-    IDigestSink digests)
+    IDigestSink digests,
+    PublicAgentConversationCoordinator? conversations = null)
 {
     public async Task HandleListeningEventAsync(
         string agentEntityId, RelayListeningEvent listening, CancellationToken ct = default)
@@ -188,6 +189,10 @@ public sealed class PublicAgentRuntime(
                 ("thread", request.ThreadRef), ("steps", 0), ("reason", "scenario_disabled")), ct);
             return new("disabled", 0, toggle);
         }
+        if (!agent.RestrictedMode)
+            return await (conversations ?? throw new InvalidOperationException(
+                "Full Public Agent mode requires the external conversation coordinator"))
+                .SubmitAsync(agent, configuration.Owner, request, ct);
         var audit = new AgentScopedAudit(state, agentEntityId);
         var runner = new EnvoyRunner(model, shareables.For(agentEntityId), relays.For(agentEntityId),
             filter, audit, configuration.Owner.PersonalWords, configuration.Owner.Canaries,

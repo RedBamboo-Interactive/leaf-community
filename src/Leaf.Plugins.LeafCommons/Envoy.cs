@@ -188,7 +188,8 @@ public interface ICommonsAudit { Task RecordAsync(string eventName, IReadOnlyDic
 
 public sealed record EnvoyRunRequest(string? ThreadRef, string Kind, string Content,
     string? SenderProvenance = null, string? TriggerId = null, bool Addressed = false,
-    string? Channel = null, string? ReplyToDisplayName = null);
+    string? Channel = null, string? ReplyToDisplayName = null,
+    IReadOnlyList<ExternalConversationAttachment>? Attachments = null);
 public sealed record EnvoyRunResult(string State, int Steps, string? Summary = null);
 
 public sealed class EnvoyRunner(

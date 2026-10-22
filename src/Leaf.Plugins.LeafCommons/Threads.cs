@@ -11,7 +11,8 @@ public sealed record PublicThreadItem(
     bool Unread,
     string? Scenario,
     string? AgentId = null,
-    string? AgentName = null);
+    string? AgentName = null,
+    string? SessionId = null);
 
 public sealed record PublicThreadAuthor(
     string Kind,
@@ -31,7 +32,8 @@ public sealed record PublicThread(
     string Title,
     string ChannelName,
     IReadOnlyList<PublicThreadMessage> Messages,
-    string? AgentId = null);
+    string? AgentId = null,
+    string? SessionId = null);
 
 public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore state)
 {
@@ -204,7 +206,8 @@ public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore s
 }
 
 public sealed class PublicAgentThreads(
-    RelayClientFactory relays, CommonsStateStore state, AgentDirectory directory)
+    RelayClientFactory relays, CommonsStateStore state, AgentDirectory directory,
+    PublicAgentConversationCoordinator conversations)
 {
     public async Task<IReadOnlyList<PublicThreadItem>> ListAsync(
         string? agentEntityId = null, CancellationToken ct = default)
@@ -222,10 +225,15 @@ public sealed class PublicAgentThreads(
         {
             var service = new PublicNovaThreads(relays.For(agent.AgentEntityId), state);
             var items = await service.ListAsync(Legacy(configuration.Owner, agent), ct);
-            result.AddRange(items.Select(item => item with
+            foreach (var item in items)
             {
-                AgentName = liveNames.GetValueOrDefault(agent.AgentEntityId) ?? agent.AgentName,
-            }));
+                result.Add(item with
+                {
+                    AgentName = liveNames.GetValueOrDefault(agent.AgentEntityId) ?? agent.AgentName,
+                    SessionId = await conversations.SessionIdAsync(
+                        agent.AgentEntityId, item.ThreadRef, ct),
+                });
+            }
         }
         return result.OrderByDescending(item => item.LastActivityAt).ToArray();
     }
@@ -247,7 +255,9 @@ public sealed class PublicAgentThreads(
             {
                 var service = new PublicNovaThreads(relays.For(agent.AgentEntityId), state);
                 var thread = await service.GetAsync(threadRef, Legacy(configuration.Owner, agent), ct);
-                if (thread.Messages.Count > 0 || candidates.Length == 1) return thread;
+                if (thread.Messages.Count > 0 || candidates.Length == 1)
+                    return thread with { SessionId = await conversations.SessionIdAsync(
+                        agent.AgentEntityId, threadRef, ct) };
             }
             catch (RelayApiException error) { lastError = error; }
         }

@@ -37,6 +37,7 @@ type AgentSettings = {
   avatarSyncReason?: string
   scenarioToggles: Record<string, boolean>
   shareableFolders: string[]
+  restrictedMode: boolean
 }
 
 const base = "/api/apps/leaf-commons"
@@ -80,6 +81,7 @@ function savePayload(settings: Settings) {
       avatarSource: agent.avatarSource,
       scenarioToggles: agent.scenarioToggles,
       shareableFolders: agent.shareableFolders,
+      restrictedMode: agent.restrictedMode,
     })),
   }
 }
@@ -160,7 +162,7 @@ export function PublicNovaSettingsPanel() {
     <section>
       <SectionHeader>Public Nova</SectionHeader>
       <p className="mb-3 text-xs leading-relaxed text-text-muted">
-        Choose which of your Agents have a public side on Discord. Each Agent keeps its own Envoy credential, avatar, scenarios, and shareable copy.
+        Choose which of your Agents have a public side on Discord. Full mode uses the same persistent workspace and tools as native Leaf Discord; Restricted mode uses only a rebuilt shareable copy.
       </p>
       {(error || notice) && <p aria-live="polite" className={`mb-3 rounded-lg border p-2 text-xs ${error ? "border-destructive-a20 bg-destructive-a10 text-destructive" : "border-primary-a20 bg-primary-a10 text-primary"}`}>{error || notice}</p>}
     </section>
@@ -234,6 +236,7 @@ function AgentCard({ agent, outfitsAvailable, busy, onChange, onRebuild, onRejoi
       {agent.avatarSyncStatus === "failed" && <p className="rounded-lg border border-destructive-a20 bg-destructive-a10 p-2 text-xs text-destructive">Avatar sync failed: {agent.avatarSyncReason ?? "unexpected_error"}.</p>}
       <SettingRow label="Avatar source" hint="Outfit is shared only when explicitly selected for this Agent."><div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2"><Button size="sm" variant={agent.avatarSource === "agent-avatar" ? "default" : "outline"} onClick={() => set("avatarSource", "agent-avatar")}>Agent avatar</Button>{outfitsAvailable && <Button size="sm" variant={agent.avatarSource === "outfit" ? "default" : "outline"} onClick={() => set("avatarSource", "outfit")}>Current outfit</Button>}</div></SettingRow>
       <div className="divide-y divide-overlay-6">{["showcase", "consult", "open_question", "bug"].map((scenario) => <SettingRow key={scenario} label={scenario.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase())}><Switch checked={agent.scenarioToggles[scenario] ?? true} onCheckedChange={(checked) => set("scenarioToggles", { ...agent.scenarioToggles, [scenario]: checked })} /></SettingRow>)}</div>
+      <SettingRow label="Restricted mode" hint="Off uses the Agent’s normal persistent workspace and tools, like native Leaf Discord. On limits this Agent to its rebuilt shareable copy."><Switch checked={agent.restrictedMode} onCheckedChange={(checked) => set("restrictedMode", checked)} /></SettingRow>
       <div><div className="mb-2 flex items-center justify-between gap-2"><span className="text-xs font-medium">Shareable folders</span><Button size="sm" variant="outline" disabled={busy} onClick={onRebuild}><i className="ph-bold ph-arrows-clockwise text-xs" />Rebuild copy</Button></div><textarea aria-label={`Shareable folders for ${agent.agentName}`} className={textareaClass} value={agent.shareableFolders.join("\n")} onChange={(event) => set("shareableFolders", lines(event.target.value))} /></div>
       <div className="flex justify-end"><Button variant="outline" size="sm" disabled={busy} className="text-text-muted" onClick={onRejoin}>{agent.credentialConfigured ? "Re-join relay…" : "Join relay…"}</Button></div>
     </div>}

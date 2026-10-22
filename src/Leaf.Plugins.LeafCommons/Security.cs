@@ -85,10 +85,11 @@ public sealed class OutboundFilter(SecretScanner secrets)
     private static readonly Regex GeneralPosixPath = new(@"(?:^|\s)(/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+)", RegexOptions.Compiled);
     private static readonly Regex Profile = new(@"(?i)(?:C:\\Users\\[^\\\s]+|/Users/[^/\s]+|/home/[^/\s]+)(?:[/\\][^\s]*)?", RegexOptions.Compiled);
 
-    public FilterDecision Check(string? text, IEnumerable<string> personalWords, IEnumerable<string> canaries)
+    public FilterDecision Check(string? text, IEnumerable<string> personalWords,
+        IEnumerable<string> canaries, int maxLength = 2_000)
     {
         if (string.IsNullOrWhiteSpace(text)) return new(false, "empty");
-        if (text.Length > 2000) return new(false, "content-too-long");
+        if (text.Length > maxLength) return new(false, "content-too-long");
         foreach (var canary in canaries.Where(x => !string.IsNullOrWhiteSpace(x)))
             if (text.Contains(canary, StringComparison.Ordinal)) return new(false, "canary", true);
         foreach (var word in personalWords.Where(x => !string.IsNullOrWhiteSpace(x)))

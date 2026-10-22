@@ -44,6 +44,7 @@ public sealed class MultiAgentTests : IDisposable
         Assert.Equal(NovaId, agent.AgentEntityId);
         Assert.Equal("credential-to-preserve", agent.Credential);
         Assert.Equal("Nova", agent.AgentName);
+        Assert.False(agent.RestrictedMode);
         Assert.Equal("", configuration.Owner.PublicName);
         Assert.Null(configuration.Owner.RelayConfirmedPublicName);
         var ownerEntity = await entities.GetBySlugAsync("leaf-commons-settings", "settings");
@@ -270,9 +271,11 @@ internal sealed class FixedHttpClientFactory(HttpMessageHandler handler) : IHttp
     public HttpClient CreateClient(string name) => new(handler, disposeHandler: false);
 }
 
-internal sealed class MultiAgentRelayHandler(string relayPublicName = "Laurent") : HttpMessageHandler
+internal sealed class MultiAgentRelayHandler(
+    string relayPublicName = "Laurent", string? rejectFirstPost = null) : HttpMessageHandler
 {
     public List<(string Route, string? Credential, string Body)> Requests { get; } = [];
+    private int postCount;
 
     protected override async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request, CancellationToken cancellationToken)
@@ -291,7 +294,12 @@ internal sealed class MultiAgentRelayHandler(string relayPublicName = "Laurent")
                 agentName, personaName = $"{agentName} · {relayPublicName}" } };
         }
         else if (request.RequestUri.AbsolutePath == "/v1/posts")
-            payload = new { decision = "posted", messageId = "message-1", threadId = "thread-1" };
+        {
+            postCount++;
+            payload = rejectFirstPost is not null && postCount == 1
+                ? new { decision = "rejected", reason = rejectFirstPost }
+                : (object)new { decision = "posted", messageId = "message-1", threadId = "thread-1" };
+        }
         else payload = new { ok = true };
         return new HttpResponseMessage(HttpStatusCode.OK)
         {

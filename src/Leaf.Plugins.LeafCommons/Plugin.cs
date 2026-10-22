@@ -21,6 +21,10 @@ public sealed class LeafCommonsPlugin : ILeafPlugin
         services.AddSingleton(new AgentShareableStores(pluginDataRoot));
         services.AddSingleton(sp => new CommonsStateStore(sp.GetRequiredKeyedService<IEntityStore>(PluginId)));
         services.AddSingleton(sp => new AgentDirectory(sp.GetRequiredKeyedService<IEntityStore>(PluginId)));
+        services.AddSingleton(sp => new CommonsExternalConversationStore(
+            sp.GetRequiredKeyedService<IEntityStore>(PluginId)));
+        services.AddSingleton(sp => new CommonsRuntimeOptionsResolver(
+            sp.GetRequiredKeyedService<IEntityStore>(PluginId)));
         services.AddSingleton<ICommonsAudit>(sp => sp.GetRequiredService<CommonsStateStore>());
         services.AddSingleton<IToolFreeModelClient, ToolFreeModelClient>();
         services.AddHttpClient("commons-relay");
@@ -35,6 +39,7 @@ public sealed class LeafCommonsPlugin : ILeafPlugin
             sp.GetRequiredKeyedService<IPluginEvents>(PluginId), sp.GetRequiredService<ICommonsAudit>()));
         services.AddSingleton<CommonsDigestSink>();
         services.AddSingleton<IDigestSink>(sp => sp.GetRequiredService<CommonsDigestSink>());
+        services.AddSingleton<PublicAgentConversationCoordinator>();
         services.AddSingleton<PublicAgentThreads>();
         services.AddSingleton(sp => new CommonsNovaContextExtension(
             sp.GetRequiredKeyedService<IPluginExtensions>(PluginId),
@@ -50,6 +55,7 @@ public sealed class LeafCommonsPlugin : ILeafPlugin
     public async Task OnStartupAsync(IPluginHost host, CancellationToken ct)
     {
         host.GetRequiredService<CommonsNovaContextExtension>().Start();
+        host.GetRequiredService<PublicAgentConversationCoordinator>().Start();
         var stopping = host.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;
         await host.GetRequiredService<PublicAgentAvatarSync>().StartAsync(stopping);
         await host.GetRequiredService<PublicAgentCoordinator>().StartAsync(stopping);
