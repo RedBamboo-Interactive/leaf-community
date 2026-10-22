@@ -166,11 +166,15 @@ public sealed class PublicAgentRuntime(
             ['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
         if (snippet.Length > 600) snippet = snippet[..599] + "…";
         var ownerNotice = string.Equals(listening.Type, "owner_notice", StringComparison.Ordinal);
+        var author = string.IsNullOrWhiteSpace(listening.AuthorDisplayName)
+            ? "a community member" : listening.AuthorDisplayName.Trim();
+        var update = string.Equals(listening.Operation, "update", StringComparison.Ordinal)
+            ? "Updated announcement" : "New announcement";
         var content = ownerNotice
             ? $"Relay notice: {snippet}"
-            : $"New announcement in #{channel}: {snippet}";
+            : $"{update} in #{channel} from {author}: {snippet}";
         await digests.DeliverAsync(new(ownerNotice ? "owner_notice" : "announcement",
-            content, null, agentEntityId, channel), ct);
+            content, null, agentEntityId, channel, listening.MessageId), ct);
     }
 
     public async Task<EnvoyRunResult> HandleAsync(

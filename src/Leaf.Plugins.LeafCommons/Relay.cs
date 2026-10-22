@@ -315,7 +315,9 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
 }
 
 public sealed record RelayListeningEvent(
-    string Id, string Type, string Channel, string Content, string? Sender, string? ThreadRef);
+    string Id, string Type, string Channel, string Content, string? Sender, string? ThreadRef,
+    string? MessageId = null, string? AuthorDisplayName = null,
+    DateTimeOffset? Timestamp = null, string? Operation = null);
 
 public sealed class ConnectorCore(
     Func<EnvoyRunRequest, CancellationToken, Task> handler,
@@ -330,7 +332,7 @@ public sealed class ConnectorCore(
         if (!processed.Add(id)) { await ack(id); return false; }
         if (frame.TryGetProperty("expiresAt", out var expires) && expires.ValueKind == JsonValueKind.Number && expires.GetInt64() <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) { await ack(id); return false; }
         var type = frame.GetProperty("type").GetString();
-        if (type is "ping" or "event" or "owner_notice")
+        if (type is "ping" or "event" or "announcement" or "owner_notice")
         {
             var thread = frame.TryGetProperty("threadRef", out var threadNode)
                 && threadNode.ValueKind == JsonValueKind.String
@@ -346,14 +348,28 @@ public sealed class ConnectorCore(
             var channel = frame.TryGetProperty("channel", out var channelNode)
                 && channelNode.ValueKind == JsonValueKind.String
                 ? channelNode.GetString() ?? "" : "";
+            var messageId = frame.TryGetProperty("messageId", out var messageIdNode)
+                && messageIdNode.ValueKind == JsonValueKind.String
+                ? messageIdNode.GetString() : null;
+            var authorDisplayName = frame.TryGetProperty("authorDisplayName", out var authorNode)
+                && authorNode.ValueKind == JsonValueKind.String
+                ? authorNode.GetString() : null;
+            DateTimeOffset? timestamp = frame.TryGetProperty("timestamp", out var timestampNode)
+                && timestampNode.ValueKind == JsonValueKind.Number
+                && timestampNode.TryGetInt64(out var timestampMilliseconds)
+                ? DateTimeOffset.FromUnixTimeMilliseconds(timestampMilliseconds) : null;
+            var operation = frame.TryGetProperty("operation", out var operationNode)
+                && operationNode.ValueKind == JsonValueKind.String
+                ? operationNode.GetString() : null;
             var attachments = ParseAttachments(frame);
-            var listeningOnly = type == "owner_notice" || (type == "event"
+            var listeningOnly = type is "owner_notice" or "announcement" || (type == "event"
                 && (string.IsNullOrWhiteSpace(thread)
                     || string.Equals(channel, "announcements", StringComparison.OrdinalIgnoreCase)));
             if (listeningOnly)
             {
                 if (listeningHandler is not null)
-                    await listeningHandler(new(id, type!, channel, content, sender, thread), ct);
+                    await listeningHandler(new(id, type!, channel, content, sender, thread,
+                        messageId, authorDisplayName, timestamp, operation), ct);
             }
             else
                 await handler(new(thread, kind, content, sender, id, Addressed: type == "ping",

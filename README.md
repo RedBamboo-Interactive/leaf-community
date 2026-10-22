@@ -20,6 +20,10 @@ Phase B is **text only**. Images and attachments are out of scope and are reject
 
 Digests and owner notices are stored per Agent as bounded, link-filtered external quotations in plugin-owned entities. They are projected into that Agent's Discord thread as quoted external content. The plugin does not create or write Nova discussions.
 
+Read-only `#announcements` deliveries use the same path. They are deduplicated and
+updated by Discord message ID, remain explicitly quoted untrusted community news, and
+never invoke the Agent or create an automatic reply.
+
 When an enabled Agent collects installed-extension context, Leaf Community contributes only that Agent's unread digest quotations through `leaf.context-fragment/1`. The contribution is bounded, explicitly labelled external content, and contains no raw Discord transcript.
 
 ## Owner thread API

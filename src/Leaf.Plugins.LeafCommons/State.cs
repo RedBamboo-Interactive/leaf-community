@@ -115,7 +115,8 @@ public sealed record CommonsConfiguration(
 
 public sealed record StoredDigest(
     Guid Id, string Type, string Content, string? ThreadRef, bool Read,
-    DateTimeOffset CreatedAt, string? AgentEntityId = null, string? SourceChannel = null);
+    DateTimeOffset CreatedAt, string? AgentEntityId = null, string? SourceChannel = null,
+    string? SourceMessageId = null);
 
 public sealed record StoredBrief(
     Guid Id, string Kind, string? Title, string ContentHash, string Outcome,
@@ -244,7 +245,8 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
 
     public async Task<StoredDigest> StoreDigestAsync(
         string type, string content, string? threadRef, CancellationToken ct = default,
-        string? agentEntityId = null, string? sourceChannel = null)
+        string? agentEntityId = null, string? sourceChannel = null,
+        string? sourceMessageId = null)
     {
         agentEntityId ??= (await ListPublicAgentsAsync(enabledOnly: true, ct: ct))
             .Select(agent => agent.AgentEntityId).SingleOrDefault();
@@ -258,7 +260,34 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
             throw new ArgumentException("A digest requires a thread reference or source channel");
         if (sourceChannel?.Length > 100)
             throw new ArgumentException("Digest source channel must be at most 100 characters", nameof(sourceChannel));
+        if (sourceMessageId?.Length > 200)
+            throw new ArgumentException("Digest source message ID must be at most 200 characters", nameof(sourceMessageId));
         var createdAt = DateTimeOffset.UtcNow;
+        if (type == "announcement" && !string.IsNullOrWhiteSpace(sourceMessageId))
+        {
+            var matches = await entities.QueryAsync(new EntityQuery
+            {
+                TypeSlug = "leaf-commons-digest",
+                DataEquals = new Dictionary<string, object?>
+                {
+                    ["digest_type"] = type,
+                    ["agent_entity_id"] = agentEntityId,
+                    ["source_message_id"] = sourceMessageId,
+                },
+                Limit = 2,
+            }, ct);
+            var existing = matches.OrderByDescending(item => item.UpdatedAt).FirstOrDefault();
+            if (existing is not null)
+            {
+                return ToDigest(await entities.PatchAsync(existing.Id, new JsonObject
+                {
+                    ["content"] = content,
+                    ["source_channel"] = sourceChannel,
+                    ["read"] = false,
+                    ["created_at"] = createdAt.ToString("O"),
+                }, ct: ct));
+            }
+        }
         var entity = await entities.CreateAsync("leaf-commons-digest", $"{type.Replace('_', ' ')} digest", new JsonObject
         {
             ["digest_type"] = type,
@@ -266,6 +295,7 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
             ["thread_ref"] = threadRef,
             ["source_channel"] = sourceChannel,
             ["agent_entity_id"] = agentEntityId,
+            ["source_message_id"] = sourceMessageId,
             ["read"] = false,
             ["created_at"] = createdAt.ToString("O")
         }, ct);
@@ -522,7 +552,8 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         return new(entity.Id, S(entity.Data, "digest_type") ?? "owner_notice",
             S(entity.Data, "content") ?? "", threadRef,
             entity.Data["read"]?.GetValue<bool>() == true, createdAt,
-            S(entity.Data, "agent_entity_id"), sourceChannel);
+            S(entity.Data, "agent_entity_id"), sourceChannel,
+            S(entity.Data, "source_message_id"));
     }
 
     private static StoredBrief ToBrief(LeafEntity entity)
