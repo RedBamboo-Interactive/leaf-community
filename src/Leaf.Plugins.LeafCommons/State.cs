@@ -8,6 +8,36 @@ using Leaf.Sdk.Services;
 
 namespace Leaf.Plugins.LeafCommons;
 
+public static class CommonsRelayDefaults
+{
+    public const string ProductionBaseUrl =
+        "https://nova-commons-relay.becherel-laurent.workers.dev";
+
+    public static string EffectiveBaseUrl(string? storedValue)
+        => string.IsNullOrWhiteSpace(storedValue)
+            ? ProductionBaseUrl
+            : storedValue.Trim();
+
+    public static string StoredValue(string? value)
+    {
+        var effective = EffectiveBaseUrl(value);
+        return SameEndpoint(effective, ProductionBaseUrl) ? "" : effective;
+    }
+
+    public static bool IsCustom(string? value)
+        => !SameEndpoint(EffectiveBaseUrl(value), ProductionBaseUrl);
+
+    private static bool SameEndpoint(string left, string right)
+    {
+        if (!Uri.TryCreate(left, UriKind.Absolute, out var leftUri)
+            || !Uri.TryCreate(right, UriKind.Absolute, out var rightUri))
+            return string.Equals(left.TrimEnd('/'), right.TrimEnd('/'),
+                StringComparison.OrdinalIgnoreCase);
+        return Uri.Compare(leftUri, rightUri, UriComponents.SchemeAndServer | UriComponents.Path,
+            UriFormat.Unescaped, StringComparison.OrdinalIgnoreCase) == 0;
+    }
+}
+
 public sealed record CommonsSettings(
     Guid? EntityId, string RelayBaseUrl, string? Credential, string ConnectionStatus,
     string Persona, string? Avatar, IReadOnlyDictionary<string, bool> ScenarioToggles,
@@ -56,6 +86,7 @@ public sealed record CommonsOwnerSettings(
     public object Public(IReadOnlyList<PublicAgentSettings> agents, bool outfitsAvailable) => new
     {
         relayBaseUrl = RelayBaseUrl,
+        relayOverrideActive = CommonsRelayDefaults.IsCustom(RelayBaseUrl),
         publicName = PublicName,
         relayConfirmedPublicName = RelayConfirmedPublicName,
         personalWords = PersonalWords,
@@ -424,12 +455,12 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
     }
 
     private static CommonsOwnerSettings DefaultOwner() => new(null,
-        "http://127.0.0.1:8787", "", [], [], [], null);
+        CommonsRelayDefaults.ProductionBaseUrl, "", [], [], [], null);
 
     private static CommonsOwnerSettings OwnerFromEntity(LeafEntity entity)
     {
         var data = entity.Data;
-        return new(entity.Id, S(data, "relay_base_url") ?? "http://127.0.0.1:8787",
+        return new(entity.Id, CommonsRelayDefaults.EffectiveBaseUrl(S(data, "relay_base_url")),
             S(data, "public_name") ?? "", List(data["personal_words"]),
             List(data["canaries"]), List(data["link_allowlist"]), S(data, "owner_user_id"),
             S(data, "relay_confirmed_public_name"));
@@ -438,7 +469,7 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
     private static JsonObject OwnerToData(CommonsOwnerSettings value) => new()
     {
         ["schema_version"] = 2,
-        ["relay_base_url"] = value.RelayBaseUrl,
+        ["relay_base_url"] = CommonsRelayDefaults.StoredValue(value.RelayBaseUrl),
         ["public_name"] = value.PublicName,
         ["relay_confirmed_public_name"] = value.RelayConfirmedPublicName,
         ["personal_words"] = JsonSerializer.SerializeToNode(value.PersonalWords),
@@ -515,7 +546,7 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
     private static CommonsSettings FromEntity(LeafEntity e)
     {
         var d = e.Data;
-        return new(e.Id, S(d, "relay_base_url") ?? "http://127.0.0.1:8787", S(d, "envoy_credential"), S(d, "connection_status") ?? "disconnected",
+        return new(e.Id, CommonsRelayDefaults.EffectiveBaseUrl(S(d, "relay_base_url")), S(d, "envoy_credential"), S(d, "connection_status") ?? "disconnected",
             S(d, "persona") ?? "Nova", S(d, "avatar"), Dict(d["scenario_toggles"]), List(d["shareable_folders"]), List(d["personal_words"]), List(d["canaries"]),
             S(d, "nova_discussion_id"), List(d["link_allowlist"]), S(d, "owner_user_id"), S(d, "agent_entity_id"),
             S(d, "avatar_source") is { } source && AvatarSources.IsValid(source) ? source : AvatarSources.AgentAvatar,
@@ -525,7 +556,7 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
     }
     private static JsonObject ToData(CommonsSettings x) => new()
     {
-        ["relay_base_url"] = x.RelayBaseUrl, ["envoy_credential"] = x.Credential, ["connection_status"] = x.ConnectionStatus,
+        ["relay_base_url"] = CommonsRelayDefaults.StoredValue(x.RelayBaseUrl), ["envoy_credential"] = x.Credential, ["connection_status"] = x.ConnectionStatus,
         ["persona"] = x.Persona, ["avatar"] = x.Avatar, ["scenario_toggles"] = JsonSerializer.SerializeToNode(x.ScenarioToggles),
         ["shareable_folders"] = JsonSerializer.SerializeToNode(x.ShareableFolders), ["personal_words"] = JsonSerializer.SerializeToNode(x.PersonalWords),
         ["canaries"] = JsonSerializer.SerializeToNode(x.Canaries), ["nova_discussion_id"] = x.NovaDiscussionId,

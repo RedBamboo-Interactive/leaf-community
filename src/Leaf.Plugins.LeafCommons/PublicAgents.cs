@@ -88,13 +88,13 @@ public sealed class RelayClientFactory(IHttpClientFactory clients, CommonsStateS
         var configuration = await state.GetConfigurationAsync(ct).ConfigureAwait(false);
         var agent = configuration.Agents.FirstOrDefault(item => string.Equals(
             item.AgentEntityId, agentEntityId, StringComparison.OrdinalIgnoreCase));
-        return (new Uri(configuration.Owner.RelayBaseUrl), agent?.Credential);
+        return (new Uri(CommonsRelayDefaults.EffectiveBaseUrl(configuration.Owner.RelayBaseUrl)), agent?.Credential);
     });
 
     public RelayHttpClient ForEnrollment(string agentEntityId) => new(clients.CreateClient("commons-relay"), async ct =>
     {
         var owner = await state.GetOwnerSettingsAsync(ct).ConfigureAwait(false);
-        return (new Uri(owner.RelayBaseUrl), (string?)null);
+        return (new Uri(CommonsRelayDefaults.EffectiveBaseUrl(owner.RelayBaseUrl)), (string?)null);
     });
 }
 
@@ -325,7 +325,7 @@ public sealed class PublicAgentCoordinator(
             var configuration = await state.GetConfigurationAsync(ct).ConfigureAwait(false);
             var agent = configuration.Agents.First(item => string.Equals(item.AgentEntityId,
                 agentEntityId, StringComparison.OrdinalIgnoreCase));
-            return (new Uri(configuration.Owner.RelayBaseUrl), agent.Credential);
+            return (new Uri(CommonsRelayDefaults.EffectiveBaseUrl(configuration.Owner.RelayBaseUrl)), agent.Credential);
         }, core, (status, ct) => SetStatusAsync(agentEntityId, status, ct),
             loggers.CreateLogger<RelayConnector>(),
             ct => ReconcileRelayProfileAsync(agentEntityId, ct));

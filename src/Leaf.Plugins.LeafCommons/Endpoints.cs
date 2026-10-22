@@ -11,7 +11,7 @@ public sealed record PublicAgentUpdate(
     bool RestrictedMode = false);
 
 public sealed record SettingsUpdate(
-    string RelayBaseUrl, string PublicName, string[] PersonalWords, string[] Canaries,
+    string? RelayBaseUrl, string PublicName, string[] PersonalWords, string[] Canaries,
     string[] LinkAllowlist, string? OwnerUserId, PublicAgentUpdate[] Agents,
     string? RelayConfirmedPublicName = null);
 
@@ -36,10 +36,13 @@ public static class CommonsEndpoints
             PublicAgentAvatarSync avatars, PublicAgentCoordinator coordinator,
             IAvatarImageSource avatarImages, CancellationToken ct) =>
         {
-            if (!Uri.TryCreate(update.RelayBaseUrl, UriKind.Absolute, out var relay)
+            var configuration = await store.GetConfigurationAsync(ct);
+            var effectiveRelay = update.RelayBaseUrl is null
+                ? configuration.Owner.RelayBaseUrl
+                : CommonsRelayDefaults.EffectiveBaseUrl(update.RelayBaseUrl);
+            if (!Uri.TryCreate(effectiveRelay, UriKind.Absolute, out var relay)
                 || relay.Scheme is not ("http" or "https"))
                 return Results.BadRequest(new { error = "invalid_relay_url" });
-            var configuration = await store.GetConfigurationAsync(ct);
             if (!CanWriteSettings(auth, configuration.Owner, update.OwnerUserId)) return Forbidden();
             var ownerId = ResolveOwnerUserId(auth, configuration.Owner, update.OwnerUserId);
             var owned = (await directory.ListAsync(ownerId, ct)).ToDictionary(
@@ -355,6 +358,7 @@ public static class CommonsEndpoints
         return new
         {
             relayBaseUrl = configuration.Owner.RelayBaseUrl,
+            relayOverrideActive = CommonsRelayDefaults.IsCustom(configuration.Owner.RelayBaseUrl),
             publicName = configuration.Owner.PublicName,
             relayConfirmedPublicName = configuration.Owner.RelayConfirmedPublicName,
             personalWords = configuration.Owner.PersonalWords,

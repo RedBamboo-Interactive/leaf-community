@@ -4,6 +4,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>Leaf.Plugins.LeafCommons</RootNamespace>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <LeafSdkProject Condition="'$(LeafSdkProject)' == '' And Exists('..\..\..\redleaf\src\Leaf.Sdk\Leaf.Sdk.csproj')">..\..\..\redleaf\src\Leaf.Sdk\Leaf.Sdk.csproj</LeafSdkProject>
   </PropertyGroup>

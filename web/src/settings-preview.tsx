@@ -5,6 +5,7 @@ import { PublicNovaSettingsPanel } from "./PublicNovaSettingsPanel"
 
 const settings = {
   relayBaseUrl: "https://nova-commons-relay-lab.example.workers.dev",
+  relayOverrideActive: true,
   publicName: "Lynial",
   outfitsAvailable: true,
   personalWords: ["example private term"],
