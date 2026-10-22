@@ -14,7 +14,7 @@ public sealed class ContractTests
     public void Manifest_contributes_digest_context_without_system_token_permission()
     {
         var manifest = new LeafCommonsPlugin().Manifest;
-        Assert.Equal("Public Nova", manifest.Name);
+        Assert.Equal("Leaf Community", manifest.Name);
         Assert.Empty(manifest.Frontend!.Extensions);
         var extension = Assert.Single(manifest.Backend!.Extensions);
         Assert.Equal(CommonsNovaContextExtension.ExtensionId, extension.Id);
@@ -40,7 +40,7 @@ public sealed class ContractTests
         Assert.Equal("/ai-session/generate", gateway.RequestUri);
         Assert.False(gateway.HadAuthorizationHeader);
         Assert.False(gateway.HadProvenanceHeader);
-        Assert.Equal("Public Agent Envoy: thread-1", gateway.JobName);
+        Assert.Equal("Leaf Community restricted reply: thread-1", gateway.JobName);
         Assert.NotNull(gateway.Provenance);
         Assert.Equal("leaf-commons", gateway.Provenance.Origin.App.Id);
         Assert.Equal("service", gateway.Provenance.Actor.Kind);
@@ -94,7 +94,7 @@ public sealed class ContractTests
     public void Digest_is_typed_bounded_external_quote_and_reduces_links_to_allowlist()
     {
         var text = new DigestFormatter().Format(new("consult_answer", "See https://docs.example.com/ok and https://evil.test/leak", "thread-1"), ["docs.example.com"], 240);
-        Assert.StartsWith("> External Commons quote", text); Assert.Contains("https://docs.example.com/ok", text); Assert.DoesNotContain("evil.test", text); Assert.True(text.Length <= 240);
+        Assert.StartsWith("> External Leaf Community quote", text); Assert.Contains("https://docs.example.com/ok", text); Assert.DoesNotContain("evil.test", text); Assert.True(text.Length <= 240);
     }
 
     [Fact]

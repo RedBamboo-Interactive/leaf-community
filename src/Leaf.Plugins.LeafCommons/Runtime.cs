@@ -23,7 +23,7 @@ public sealed class CommonsRuntime(
         var runner = new EnvoyRunner(model, shareable, relay, filter, state, settings.PersonalWords, settings.Canaries);
         var result = await runner.RunAsync(request, ct);
         if (result.State == "blocked" && !string.IsNullOrWhiteSpace(request.ThreadRef))
-            await digests.DeliverAsync(new("owner_notice", $"An Envoy post was blocked locally by rule `{result.Summary}`. No blocked content was sent.", request.ThreadRef), ct);
+            await digests.DeliverAsync(new("owner_notice", $"A public Agent reply was blocked locally by rule `{result.Summary}`. No blocked content was sent.", request.ThreadRef), ct);
         if (result.State == "failed" && request.Addressed && !string.IsNullOrWhiteSpace(request.ThreadRef))
             await digests.DeliverAsync(new("owner_notice", $"I couldn't answer thread {request.ThreadRef}: {result.Summary ?? "unknown_failure"}.", request.ThreadRef), ct);
         if (result.State is not ("blocked" or "failed") && !string.IsNullOrWhiteSpace(request.ThreadRef) && !string.IsNullOrWhiteSpace(result.Summary))
@@ -200,7 +200,7 @@ public sealed class PublicAgentRuntime(
         var result = await runner.RunAsync(request, ct);
         if (result.State == "blocked" && !string.IsNullOrWhiteSpace(request.ThreadRef))
             await digests.DeliverAsync(new("owner_notice",
-                $"An Envoy post was blocked locally by rule `{result.Summary}`. No blocked content was sent.",
+                $"A public Agent reply was blocked locally by rule `{result.Summary}`. No blocked content was sent.",
                 request.ThreadRef, agentEntityId), ct);
         if (result.State == "failed" && request.Addressed && !string.IsNullOrWhiteSpace(request.ThreadRef))
             await digests.DeliverAsync(new("owner_notice",

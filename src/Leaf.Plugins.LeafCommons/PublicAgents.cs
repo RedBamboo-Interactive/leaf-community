@@ -31,9 +31,28 @@ public sealed class AgentDirectory(IEntityStore entities)
             ? new(entity.Id.ToString(), entity.Name, Avatar(entity.Data)) : null;
     }
 
-    private static bool OwnedBy(LeafEntity entity, string ownerUserId)
-        => string.Equals(entity.CreatedBy, ownerUserId, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(Text(entity.Data, "owner_id"), ownerUserId, StringComparison.OrdinalIgnoreCase);
+    internal static bool OwnedBy(LeafEntity entity, string ownerUserId)
+    {
+        // Agent entities created before account-backed ownership use local-user for
+        // the installation owner. Discord and Nova both treat that subject as the
+        // locally usable owner identity. An explicit owner_id wins so a plugin may
+        // deliberately expose an Agent, while plugin/system Agents are otherwise
+        // never inferred to belong to the owner.
+        var explicitOwner = Text(entity.Data, "owner_id");
+        if (!string.IsNullOrWhiteSpace(explicitOwner))
+            return IsOwnerSubject(explicitOwner, ownerUserId);
+        var creator = entity.CreatedBy;
+        if (string.IsNullOrWhiteSpace(creator)
+            || creator.Equals("system", StringComparison.OrdinalIgnoreCase)
+            || creator.StartsWith("system:", StringComparison.OrdinalIgnoreCase)
+            || creator.StartsWith("plugin:", StringComparison.OrdinalIgnoreCase))
+            return false;
+        return IsOwnerSubject(creator, ownerUserId);
+    }
+
+    private static bool IsOwnerSubject(string subject, string ownerUserId)
+        => subject.Equals(ownerUserId, StringComparison.OrdinalIgnoreCase)
+            || subject.Equals("local-user", StringComparison.OrdinalIgnoreCase);
 
     private static string? Avatar(JsonObject data)
     {

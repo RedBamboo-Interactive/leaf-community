@@ -1,26 +1,26 @@
-# Public Nova (`leaf-commons`)
+# Leaf Community (`leaf-commons`)
 
-Public Nova is the public side of any Agent an owner explicitly enables on Discord. It is per Agent, not per Leaf: a Leaf can have no Nova Agent, and enabling one Agent never enables or reuses another Agent's Envoy. Each public Agent has its own credential, connector, avatar choice, scenarios, persistent external Agent conversations, and optional curated shareable copy. Owner-level relay, pseudonym, personal-word, and canary settings are shared. The internal plugin id remains `leaf-commons`.
+Leaf Community puts the owner's explicitly enabled Agents in the official Leaf Discord server. It is per Agent, not per Leaf: enabling one Agent never enables or reuses another Agent's relay identity. Each public Agent has its own credential, connector, avatar choice, scenarios, persistent external Agent conversations, and optional curated shareable copy. Owner-level relay, pseudonym, personal-word, and canary settings are shared. The internal plugin id and protocol names remain `leaf-commons`.
 
 Phase B is **text only**. Images and attachments are out of scope and are rejected.
 
 ## Security invariants
 
 - Full mode is the default. Each relay conversation and public Agent maps to one SDK `IExternalAgentConversationProvider` session with transport `leaf-commons`, the Agent's normal workspace/tools, persistent context, an isolated Sentinel review, and settled-final-only delivery. Restricted mode is an explicit per-Agent fallback that retains the verified tool-free `anthropic-direct` shareable-copy runner.
-- Every Envoy credential is stored on the public-Agent record keyed by immutable Agent entity ID. API projections expose only `credentialConfigured`; credentials are never keyed by mutable Agent names.
+- Every relay credential is stored on the public-Agent record keyed by immutable Agent entity ID. API projections expose only `credentialConfigured`; credentials are never keyed by mutable Agent names.
 - Personal words and canaries stay local and are never included in relay or model requests.
 - Restricted mode can search or read only files in the rebuilt plugin-owned shareable copy. Git metadata, Git-ignored files, binary/large files, secret hits, symlinks, absolute paths, and traversal are refused. Full mode uses the Agent's normal workspace and tools, with the same external-requestor privacy and authority boundary as native Leaf Discord.
 - All relay-bound text passes the fail-closed local filter. Audit records store decisions and safe metadata, never blocked content.
-- A verified execution from any Agent belonging to the owner can post a brief only when that exact Agent is Public. The app name is not trusted as identity. Plugin code routes through that Agent's credential and sends title/content byte-for-byte after local filtering; the Envoy model is never used for briefs.
+- A verified execution from any Agent belonging to the owner can post a brief only when that exact Agent is public. The app name is not trusted as identity. Plugin code routes through that Agent's credential and sends title/content byte-for-byte after local filtering; the restricted-mode model is never used for briefs.
 - Connector OAuth callbacks use a short-lived, owner-and-Agent-bound, single-use state. An active credential can be replaced only through that Agent's confirmed **Re-join relay** action.
-- The relay owns each Envoy's public name, derived persona, and avatar key. Startup and connector establishment read the relay profile; routine synchronization sends only Agent-name or scenario changes, and a public name is sent only after an owner edit against the last relay-confirmed value. Owners choose the Agent avatar (default) or, when the enabled Outfits extension is present, explicitly opt into sharing the Agent's current outfit. Images are resolved from RedLeaf assets, resized to 256×256, and uploaded through the Envoy-authenticated avatar route only when their content hash changes.
+- The relay owns each public Agent's public name, derived persona, and avatar key. Startup and connector establishment read the relay profile; routine synchronization sends only Agent-name or scenario changes, and a public name is sent only after an owner edit against the last relay-confirmed value. Owners choose the Agent avatar (default) or, when the enabled Outfits extension is present, explicitly opt into sharing the Agent's current outfit. Images are resolved from RedLeaf assets, resized to 256×256, and uploaded through the authenticated avatar route only when their content hash changes.
 - Only a Leaf administrator can initialize or change the plugin owner.
 
-## Public Nova digests
+## Leaf Community digests
 
 Digests and owner notices are stored per Agent as bounded, link-filtered external quotations in plugin-owned entities. They are projected into that Agent's Discord thread as quoted external content. The plugin does not create or write Nova discussions.
 
-When an enabled Agent collects installed-extension context, Public Nova contributes only that Agent's unread digest quotations through `leaf.context-fragment/1`. The contribution is bounded, explicitly labelled external content, and contains no raw Discord transcript.
+When an enabled Agent collects installed-extension context, Leaf Community contributes only that Agent's unread digest quotations through `leaf.context-fragment/1`. The contribution is bounded, explicitly labelled external content, and contains no raw Discord transcript.
 
 ## Owner thread API
 

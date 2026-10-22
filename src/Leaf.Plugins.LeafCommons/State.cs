@@ -325,7 +325,7 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
         var slug = OAuthStateSlug(token);
         var issuedAt = now ?? DateTimeOffset.UtcNow;
-        await entities.UpsertBySlugAsync("leaf-commons-oauth-state", slug, "Commons OAuth state", new JsonObject
+        await entities.UpsertBySlugAsync("leaf-commons-oauth-state", slug, "Leaf Community OAuth state", new JsonObject
         {
             ["owner_id"] = ownerId,
             ["agent_entity_id"] = agentEntityId,

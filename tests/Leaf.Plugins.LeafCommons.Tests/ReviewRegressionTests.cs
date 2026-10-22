@@ -316,9 +316,10 @@ internal sealed class MemoryEntityStore : IEntityStore
 
     public Task<LeafEntity?> GetAsync(Guid id, CancellationToken ct = default) => Task.FromResult(byId.GetValueOrDefault(id));
 
-    public LeafEntity Seed(Guid id, string typeSlug, string name, string slug, JsonObject data)
+    public LeafEntity Seed(Guid id, string typeSlug, string name, string slug, JsonObject data,
+        string createdBy = "test")
     {
-        var entity = New(id, typeSlug, slug, name, data);
+        var entity = New(id, typeSlug, slug, name, data, createdBy: createdBy);
         byId[id] = entity;
         return entity;
     }
@@ -372,9 +373,11 @@ internal sealed class MemoryEntityStore : IEntityStore
 
     public Task DeleteAsync(Guid id, CancellationToken ct = default) { byId.Remove(id); return Task.CompletedTask; }
 
-    private LeafEntity New(Guid id, string typeSlug, string slug, string name, JsonObject data, DateTimeOffset? created = null)
+    private LeafEntity New(Guid id, string typeSlug, string slug, string name, JsonObject data,
+        DateTimeOffset? created = null, string createdBy = "test")
     {
         var updated = DateTimeOffset.UnixEpoch.AddTicks(++revision);
-        return new(id, typeSlug, slug, name, (JsonObject)data.DeepClone(), created ?? updated, updated, "test");
+        return new(id, typeSlug, slug, name, (JsonObject)data.DeepClone(), created ?? updated,
+            updated, createdBy);
     }
 }

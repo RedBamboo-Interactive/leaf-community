@@ -118,7 +118,7 @@ public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore s
             settings.AgentEntityId))
         {
             messages.Add(new($"digest-{digest.Id:N}", digest.CreatedAt,
-                new("self", "Public Nova digest"), digest.Content));
+                new("self", "Leaf Community digest"), digest.Content));
         }
 
         var summary = summaries.FirstOrDefault(item => string.Equals(item.ThreadRef, threadRef, StringComparison.Ordinal));

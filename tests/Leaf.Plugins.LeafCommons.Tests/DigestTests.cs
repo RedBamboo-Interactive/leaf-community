@@ -22,7 +22,7 @@ public sealed class DigestTests
 
         var items = await state.ListDigestsAsync();
         Assert.Equal(["t2", "t1"], items.Select(x => x.ThreadRef));
-        Assert.All(items, x => Assert.StartsWith("> External Commons quote", x.Content));
+        Assert.All(items, x => Assert.StartsWith("> External Leaf Community quote", x.Content));
         Assert.DoesNotContain("evil.test", items[1].Content);
         Assert.False(items[0].Read);
         Assert.True(items[0].Content.Length <= 1200);
@@ -41,7 +41,7 @@ public sealed class DigestTests
         await state.SaveSettingsAsync(new(null, "https://relay.example", "credential", "active", "Nova", null,
             new Dictionary<string, bool>(), [], [], [], null, [], "owner-1", "agent-1"));
         for (var i = 0; i < 5; i++)
-            await state.StoreDigestAsync("owner_notice", $"> External Commons quote — owner notice\n> notice {i}", $"t{i}");
+            await state.StoreDigestAsync("owner_notice", $"> External Leaf Community quote — owner notice\n> notice {i}", $"t{i}");
         var extensions = new CapturingPluginExtensions();
         var contribution = new CommonsNovaContextExtension(extensions, state);
         contribution.Start();

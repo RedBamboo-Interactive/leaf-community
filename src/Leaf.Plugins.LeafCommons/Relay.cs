@@ -268,7 +268,7 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
         Uri baseUri, string? credential, HttpMethod method, string path, HttpContent? content,
         CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(credential)) throw new InvalidOperationException("Envoy credential is not configured");
+        if (string.IsNullOrWhiteSpace(credential)) throw new InvalidOperationException("Relay credential is not configured");
         using var request = new HttpRequestMessage(method, new Uri(baseUri, path)) { Content = content };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credential);
         return await http.SendAsync(request, ct);
@@ -418,7 +418,7 @@ public sealed class RelayConnector(Func<CancellationToken, Task<(Uri BaseUri, st
                 catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
                 catch (Exception error)
                 {
-                    logger.LogError(error, "Commons connector iteration failed");
+                    logger.LogError(error, "Leaf Community connector iteration failed");
                     await SetStatusAsync("reconnecting", ct);
                     await Task.Delay(delay + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 500)), ct);
                     delay = TimeSpan.FromSeconds(Math.Min(30, delay.TotalSeconds * 2));

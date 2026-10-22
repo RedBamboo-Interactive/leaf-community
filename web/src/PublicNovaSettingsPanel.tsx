@@ -98,13 +98,13 @@ export function PublicNovaSettingsPanel() {
       setSettings(await api<Settings>("/settings"))
       setError("")
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Public Nova settings could not load")
+      setError(cause instanceof Error ? cause.message : "Leaf Community settings could not load")
     }
   }, [])
 
   useEffect(() => { void reload() }, [reload])
 
-  if (!settings) return <div className="py-8 text-sm text-text-muted">{error || "Loading Public Nova…"}</div>
+  if (!settings) return <div className="py-8 text-sm text-text-muted">{error || "Loading Leaf Community…"}</div>
   const update = <K extends keyof Settings>(key: K, value: Settings[K]) =>
     setSettings({ ...settings, [key]: value })
   const updateAgent = (agentId: string, change: (agent: AgentSettings) => AgentSettings) =>
@@ -120,10 +120,10 @@ export function PublicNovaSettingsPanel() {
         body: JSON.stringify(savePayload(settings)),
       })
       setSettings(saved)
-      setNotice("Public Nova settings saved.")
+      setNotice("Leaf Community settings saved.")
       return saved
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Public Nova settings could not be saved")
+      setError(cause instanceof Error ? cause.message : "Leaf Community settings could not be saved")
       throw cause
     } finally {
       setBusy(false)
@@ -160,7 +160,7 @@ export function PublicNovaSettingsPanel() {
 
   return <div className="space-y-5">
     <section>
-      <SectionHeader>Public Nova</SectionHeader>
+      <SectionHeader>Leaf Community</SectionHeader>
       <p className="mb-3 text-xs leading-relaxed text-text-muted">
         Choose which of your Agents have a public side on Discord. Full mode uses the same persistent workspace and tools as native Leaf Discord; Restricted mode uses only a rebuilt shareable copy.
       </p>
@@ -189,7 +189,7 @@ export function PublicNovaSettingsPanel() {
         {settings.agents.map((agent) => <AgentCard key={agent.agentId} agent={agent} outfitsAvailable={settings.outfitsAvailable} busy={busy}
           onChange={(change) => updateAgent(agent.agentId, change)}
           onRebuild={() => void rebuild(agent)} onRejoin={() => setConfirmRejoin(agent.agentId)} />)}
-        {settings.agents.length === 0 && <p className="rounded-lg border border-overlay-6 p-3 text-xs text-text-muted">No Agents belong to this owner yet. Public Nova does not require a Nova Agent.</p>}
+        {settings.agents.length === 0 && <p className="rounded-lg border border-overlay-6 p-3 text-xs text-text-muted">No owner-usable Agents are available yet.</p>}
       </div>
     </section>
 
@@ -203,7 +203,7 @@ export function PublicNovaSettingsPanel() {
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>Re-join this Agent?</DialogTitle>
-          <DialogDescription>This replaces only this Agent’s Envoy credential and briefly disconnects that Agent.</DialogDescription>
+          <DialogDescription>This replaces only this Agent’s relay credential and briefly disconnects that Agent.</DialogDescription>
         </DialogHeader>
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={() => setConfirmRejoin(null)}>Cancel</Button>

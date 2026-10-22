@@ -29,7 +29,7 @@ public sealed class ThreadsTests
             ["thread"] = "thread-1", ["scenario"] = "consult", ["reason"] = "absolute-path",
             ["content"] = "BLOCKED CONTENT MUST NEVER APPEAR",
         });
-        await state.StoreDigestAsync("owner_notice", "> External Commons quote — owner notice\n> Safe notice", "thread-1");
+        await state.StoreDigestAsync("owner_notice", "> External Leaf Community quote — owner notice\n> Safe notice", "thread-1");
         var service = new PublicNovaThreads(relay, state);
 
         var listed = Assert.Single(await service.ListAsync(settings));
@@ -46,8 +46,8 @@ public sealed class ThreadsTests
         Assert.Equal("", blocked.Text);
         Assert.Equal("absolute-path", blocked.Reason);
         var digest = Assert.Single(thread.Messages, message => message.Id.StartsWith("digest-", StringComparison.Ordinal));
-        Assert.Equal("Public Nova digest", digest.Author.Name);
-        Assert.StartsWith("> External Commons quote", digest.Text);
+        Assert.Equal("Leaf Community digest", digest.Author.Name);
+        Assert.StartsWith("> External Leaf Community quote", digest.Text);
         Assert.DoesNotContain("BLOCKED CONTENT MUST NEVER APPEAR",
             string.Join("\n", thread.Messages.Select(message => message.Text)));
     }

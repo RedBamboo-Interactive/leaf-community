@@ -92,9 +92,9 @@ public sealed class CommonsExternalConversationStore(IEntityStore entities)
     {
         var data = entity.Data;
         return new(entity.Id,
-            Text(data, "binding_id") ?? throw new InvalidOperationException("Commons conversation has no binding ID"),
-            Text(data, "agent_entity_id") ?? throw new InvalidOperationException("Commons conversation has no Agent ID"),
-            Text(data, "thread_ref") ?? throw new InvalidOperationException("Commons conversation has no thread reference"),
+            Text(data, "binding_id") ?? throw new InvalidOperationException("Leaf Community conversation has no binding ID"),
+            Text(data, "agent_entity_id") ?? throw new InvalidOperationException("Leaf Community conversation has no Agent ID"),
+            Text(data, "thread_ref") ?? throw new InvalidOperationException("Leaf Community conversation has no thread reference"),
             Number(data, "generation", 1), Text(data, "provider_id"),
             Text(data, "conversation_id"), Text(data, "session_id"),
             Text(data, "cursor_epoch"), Number(data, "cursor_sequence", 0),
@@ -124,11 +124,11 @@ public sealed class CommonsRuntimeOptionsResolver(IEntityStore entities)
             ? await entities.GetAsync(id, ct)
             : await entities.GetBySlugAsync("quality-mode", reference, ct);
         if (entity is not { TypeSlug: "quality-mode" })
-            throw new InvalidOperationException($"Public Nova quality mode '{reference}' was not found");
+            throw new InvalidOperationException($"Leaf Community quality mode '{reference}' was not found");
         var provider = Text(entity.Data, "provider");
         var tier = Text(entity.Data, "quality_tier");
         if (string.IsNullOrWhiteSpace(provider) || string.IsNullOrWhiteSpace(tier))
-            throw new InvalidOperationException($"Public Nova quality mode '{reference}' is incomplete");
+            throw new InvalidOperationException($"Leaf Community quality mode '{reference}' is incomplete");
         return new(entity.Slug, provider, tier,
             Text(entity.Data, "model"), Text(entity.Data, "effort"));
     }

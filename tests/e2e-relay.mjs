@@ -45,7 +45,7 @@ try{
   let ready=false;for(let i=0;i<150&&!ready;i++){if(child.exitCode!==null)throw new Error(output);try{ready=(await call("/health")).ok}catch{}if(!ready)await new Promise(r=>setTimeout(r,100))}assert.ok(ready,output)
   const a=await joinEnvoy("a"),b=await joinEnvoy("b");assert.equal(a.envoy.status,"pending");assert.equal(b.envoy.status,"pending");await approve(a.envoy.id);await approve(b.envoy.id)
   const digests=[],bShareable=new Map([["project/retry.md","Retries use exponential backoff capped at 30 seconds."]]);let threadRef,aDigested=false,bAnswered=false
-  aCore=new ConnectorCore("A",async frame=>{if(frame.type!=="ping"||aDigested)return;aDigested=true;const scripted={action:"done",summary:"B recommends exponential backoff capped at 30 seconds."};assert.equal(scripted.action,"done");digests.push({type:"consult_answer",content:`> External Commons quote — consult answer\n> ${scripted.summary}`,threadRef:frame.threadRef})})
+  aCore=new ConnectorCore("A",async frame=>{if(frame.type!=="ping"||aDigested)return;aDigested=true;const scripted={action:"done",summary:"B recommends exponential backoff capped at 30 seconds."};assert.equal(scripted.action,"done");digests.push({type:"consult_answer",content:`> External Leaf Community quote — consult answer\n> ${scripted.summary}`,threadRef:frame.threadRef})})
   bCore=new ConnectorCore("B",async frame=>{if(frame.type!=="ping"||bAnswered)return;bAnswered=true;const searchAction={action:"search_shareable",query:"backoff"};assert.equal(searchAction.action,"search_shareable");const hits=[...bShareable].filter(([,v])=>v.toLowerCase().includes(searchAction.query)).map(([p])=>p);assert.deepEqual(hits,["project/retry.md"]);const read=bShareable.get(hits[0]);const action={action:"post",content:`From my curated shareable set: ${read}`,addresses:[a.envoy.id]};await post(b.credential,{scenario:"consult_reply",threadRef:frame.threadRef,content:action.content,addresses:action.addresses,idempotencyKey:"b-answer"})})
   await Promise.all([aCore.connect(a.credential),bCore.connect(b.credential)])
   const brief={kind:"consult",title:"  Retry strategy consult  ",content:"What retry strategy does your shareable engineering set recommend?\nKeep this line exactly.",addresses:[b.envoy.id]}
@@ -53,7 +53,7 @@ try{
   assert.equal(webhookBodies[0].thread_name,brief.title,"brief title must be byte-exact")
   assert.equal(webhookBodies[0].content,brief.content,"brief content must be byte-exact")
   await waitFor(()=>bCore.frames.some(f=>f.type==="ping"&&f.threadRef===threadRef),"B ping")
-  await waitFor(()=>digests.length===1,"A digest");assert.equal(digests[0].type,"consult_answer");assert.match(digests[0].content,/External Commons quote/);assert.doesNotMatch(digests[0].content,/raw Discord/i)
+  await waitFor(()=>digests.length===1,"A digest");assert.equal(digests[0].type,"consult_answer");assert.match(digests[0].content,/External Leaf Community quote/);assert.doesNotMatch(digests[0].content,/raw Discord/i)
   assert.equal((await post(a.credential,{scenario:"consult_reply",threadRef,content:"Exchange three",addresses:[b.envoy.id],idempotencyKey:"ex-3"})).decision,"posted")
   assert.equal((await post(b.credential,{scenario:"consult_reply",threadRef,content:"Exchange four",addresses:[a.envoy.id],idempotencyKey:"ex-4"})).decision,"posted")
   const fifth=await post(a.credential,{scenario:"consult_reply",threadRef,content:"Exchange five",addresses:[b.envoy.id],idempotencyKey:"ex-5"});assert.equal(fifth.reason,"wait_for_human")

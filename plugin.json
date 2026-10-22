@@ -1,9 +1,9 @@
 {
   "id": "leaf-commons",
-  "name": "Public Nova",
+  "name": "Leaf Community",
   "version": "0.1.0",
   "kernelApi": "^0.1.0",
-  "description": "Owner-gated, per-Agent public Envoys for Discord through the Commons relay.",
+  "description": "Your Agents in the official Leaf Discord server.",
   "icon": "ph-leaf",
   "color": "emerald",
   "requires": ["entities", "assets", "records", "discussions", "nova"],
@@ -15,7 +15,7 @@
       "slot": "context-contributor",
       "contract": "leaf.context-fragment/1",
       "order": 60,
-      "description": "Contributes a bounded owner-scoped summary of unread quoted Public Nova digests"
+      "description": "Contributes a bounded owner-scoped summary of unread quoted Leaf Community digests"
     }]
   },
   "frontend": {

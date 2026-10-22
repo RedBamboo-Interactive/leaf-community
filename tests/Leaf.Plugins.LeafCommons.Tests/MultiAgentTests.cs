@@ -22,7 +22,7 @@ public sealed class MultiAgentTests : IDisposable
     public async Task Legacy_single_config_migrates_to_Nova_entity_id_without_losing_credential()
     {
         var entities = new MemoryEntityStore();
-        entities.Seed(Guid.NewGuid(), "leaf-commons-settings", "Nova Commons Settings", "settings",
+        entities.Seed(Guid.NewGuid(), "leaf-commons-settings", "Leaf Community Settings", "settings",
             new JsonObject
             {
                 ["relay_base_url"] = "https://relay.example",
@@ -232,7 +232,7 @@ public sealed class MultiAgentTests : IDisposable
         Assert.Equal("announcements", digest.SourceChannel);
         Assert.Contains("New announcement in #announcements: Relay maintenance complete.",
             digest.Content);
-        Assert.StartsWith("> External Commons quote", digest.Content);
+        Assert.StartsWith("> External Leaf Community quote", digest.Content);
     }
 
     private async Task<CommonsStateStore> StoreWithTwoAgentsAsync(bool secondEnabled = true)
