@@ -143,8 +143,11 @@ public sealed class PublicAgentRuntime(
     OutboundFilter filter,
     CommonsStateStore state,
     IDigestSink digests,
-    PublicAgentConversationCoordinator? conversations = null)
+    PublicAgentConversationCoordinator? conversations = null,
+    CommonsOutboundReview? outboundReview = null)
 {
+    private readonly CommonsOutboundReview review = outboundReview ?? CommonsOutboundReview.Unavailable;
+
     public async Task HandleListeningEventAsync(
         string agentEntityId, RelayListeningEvent listening, CancellationToken ct = default)
     {
@@ -198,7 +201,10 @@ public sealed class PublicAgentRuntime(
                 "Full Public Agent mode requires the external conversation coordinator"))
                 .SubmitAsync(agent, configuration.Owner, request, ct);
         var audit = new AgentScopedAudit(state, agentEntityId);
-        var runner = new EnvoyRunner(model, shareables.For(agentEntityId), relays.For(agentEntityId),
+        // Every post the restricted runner makes passes the outbound Sentinel first; a refusal
+        // reads as a rejected post, which the runner answers with its fixed fallback.
+        var runner = new EnvoyRunner(model, shareables.For(agentEntityId),
+            new ReviewedEnvoyRelay(relays.For(agentEntityId), review, agentEntityId, audit),
             filter, audit, configuration.Owner.PersonalWords, configuration.Owner.Canaries,
             speakerName: agent.DisplayPersona(configuration.Owner.PublicName));
         var result = await runner.RunAsync(request, ct);
@@ -265,6 +271,15 @@ public sealed class PublicAgentRuntime(
             return await FinishBriefAsync(brief, agent.AgentEntityId, "blocked", null,
                 decision.Rule ?? "filter_blocked", dispatchId, ct);
 
+        var verdict = await review.ReviewAsync(agent.AgentEntityId, scenario,
+            $"{brief.Title}\n\n{brief.Content}" + (addresses.Length > 0 ? $"\n\n[addresses] {string.Join(", ", addresses)}" : ""),
+            $"commons-brief:{dispatchId:N}", ct);
+        await state.RecordAsync("outbound_review", Metadata(agent.AgentEntityId,
+            ("dispatchId", dispatchId), ("outcome", verdict.Review["outcome"]?.GetValue<string>()),
+            ("available", !verdict.Unavailable)), ct);
+        if (!verdict.Allowed)
+            return await FinishBriefAsync(brief, agent.AgentEntityId, "blocked", null,
+                verdict.Unavailable ? "sentinel_unavailable" : "sentinel_held", dispatchId, ct);
         var posted = await relays.For(agent.AgentEntityId).OpenAsync(scenario, brief.Title,
             brief.Content, addresses, $"leaf-commons-brief-{dispatchId:N}", ct);
         await state.RecordAsync("relay_post", Metadata(agent.AgentEntityId,

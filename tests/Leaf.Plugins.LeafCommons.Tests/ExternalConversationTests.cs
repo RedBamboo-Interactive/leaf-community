@@ -79,6 +79,7 @@ public sealed class ExternalConversationTests : IDisposable
         ];
 
         await fixture.Provider.NotifyAsync();
+        await fixture.Coordinator.WhenIdleAsync();
 
         var post = Assert.Single(fixture.Relay.Requests,
             item => item.Route == "POST /v1/posts");
@@ -102,6 +103,7 @@ public sealed class ExternalConversationTests : IDisposable
         ];
 
         await fixture.Provider.NotifyAsync();
+        await fixture.Coordinator.WhenIdleAsync();
 
         var post = Assert.Single(fixture.Relay.Requests,
             item => item.Route == "POST /v1/posts");
@@ -129,6 +131,7 @@ public sealed class ExternalConversationTests : IDisposable
         ];
 
         await fixture.Provider.NotifyAsync();
+        await fixture.Coordinator.WhenIdleAsync();
 
         var posts = fixture.Relay.Requests
             .Where(item => item.Route == "POST /v1/posts").ToArray();
@@ -160,6 +163,124 @@ public sealed class ExternalConversationTests : IDisposable
     }
 
     [Fact]
+    public async Task A_held_settled_reply_is_withheld_with_a_fixed_notice_and_reported_to_the_session()
+    {
+        var fixture = await CreateAsync();
+        await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-1", "Where does he live?"));
+        fixture.Sentinel.Decide = _ => TestSentinel.Leak;
+        fixture.Provider.Messages = [Message(1, "assistant", "text", "He lives at 14 rue des Lilas.")];
+
+        await fixture.Provider.NotifyAsync();
+        await fixture.Coordinator.WhenIdleAsync();
+
+        var post = Assert.Single(fixture.Relay.Requests, item => item.Route == "POST /v1/posts");
+        Assert.DoesNotContain("rue des Lilas", post.Body, StringComparison.Ordinal);
+        using (var body = JsonDocument.Parse(post.Body))
+            Assert.EndsWith(CommonsOutboundReview.WithheldNotice, body.RootElement.GetProperty("content").GetString());
+        var request = Assert.Single(fixture.Sentinel.Requests);
+        Assert.Equal(UntrustedContentDirection.Outbound, request.Direction);
+        Assert.Equal(UntrustedContentSources.LeafCommons, request.Origin.Source);
+        Assert.Contains(await fixture.State.ListDigestsAsync(), digest => digest.Type == "owner_notice");
+
+        fixture.Sentinel.Decide = _ => TestSentinel.Clean;
+        await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-2", "OK."));
+        var reported = Assert.IsType<JsonArray>(fixture.Provider.Inputs[^1].Metadata!["outbound_sentinel_reviews"]);
+        Assert.Equal("withheld", Assert.Single(reported)!["outcome"]!.GetValue<string>());
+        await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-3", "Again."));
+        Assert.Null(fixture.Provider.Inputs[^1].Metadata!["outbound_sentinel_reviews"]);
+    }
+
+    [Fact]
+    public async Task An_unavailable_review_is_retried_a_bounded_number_of_times_then_withheld()
+    {
+        var fixture = await CreateAsync();
+        await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-1", "Hi"));
+        fixture.Sentinel.Decide = _ => UntrustedContentVerdict.Unavailable();
+        fixture.Provider.Messages = [Message(1, "assistant", "text", "Here is the fix.")];
+
+        await fixture.Provider.NotifyAsync();
+        await fixture.Coordinator.WhenIdleAsync();
+
+        Assert.Equal(PublicAgentConversationCoordinator.MaxOutboundReviewAttempts, fixture.Sentinel.Requests.Count);
+        var post = Assert.Single(fixture.Relay.Requests, item => item.Route == "POST /v1/posts");
+        Assert.DoesNotContain("Here is the fix.", post.Body, StringComparison.Ordinal);
+        using var body = JsonDocument.Parse(post.Body);
+        Assert.EndsWith(CommonsOutboundReview.UnavailableNotice, body.RootElement.GetProperty("content").GetString());
+    }
+
+    [Fact]
+    public async Task An_unavailable_review_that_recovers_delivers_the_reply()
+    {
+        var fixture = await CreateAsync();
+        await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-1", "Hi"));
+        var calls = 0;
+        fixture.Sentinel.Decide = _ => ++calls == 1 ? UntrustedContentVerdict.Unavailable() : TestSentinel.Clean;
+        fixture.Provider.Messages = [Message(1, "assistant", "text", "Here is the fix.")];
+
+        await fixture.Provider.NotifyAsync();
+        await fixture.Coordinator.WhenIdleAsync();
+
+        Assert.Equal(2, fixture.Sentinel.Requests.Count);
+        var post = Assert.Single(fixture.Relay.Requests, item => item.Route == "POST /v1/posts");
+        Assert.Contains("Here is the fix.", post.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_verdict_without_the_outbound_direction_is_unavailable()
+    {
+        var fixture = await CreateAsync();
+        await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-1", "Hi"));
+        fixture.Sentinel.EchoDirection = false;
+        fixture.Provider.Messages = [Message(1, "assistant", "text", "Here is the fix.")];
+
+        await fixture.Provider.NotifyAsync();
+        await fixture.Coordinator.WhenIdleAsync();
+
+        var post = Assert.Single(fixture.Relay.Requests, item => item.Route == "POST /v1/posts");
+        Assert.DoesNotContain("Here is the fix.", post.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Restricted_mode_answers_pass_the_outbound_review_or_fall_back()
+    {
+        var fixture = await CreateAsync(restrictedMode: true);
+        fixture.Sentinel.Decide = request => request.Content.Contains("Restricted answer", StringComparison.Ordinal)
+            ? TestSentinel.Leak : TestSentinel.Clean;
+        var runtime = new PublicAgentRuntime(
+            new CountingModel("{\"action\":\"post\",\"content\":\"Restricted answer.\"}"),
+            new AgentShareableStores(root),
+            new RelayClientFactory(new FixedHttpClientFactory(fixture.Relay), fixture.State),
+            new OutboundFilter(new SecretScanner()), fixture.State, new NullDigestSink(),
+            fixture.Coordinator,
+            new CommonsOutboundReview(new CommonsRuntimeOptionsResolver(fixture.Entities), fixture.Sentinel));
+
+        await runtime.HandleAsync(AgentId, Request("restricted-1", "What is the answer?"));
+
+        var posts = fixture.Relay.Requests.Where(item => item.Route == "POST /v1/posts").ToArray();
+        Assert.DoesNotContain(posts, item => item.Body.Contains("Restricted answer", StringComparison.Ordinal));
+        Assert.Contains(posts, item => JsonDocument.Parse(item.Body).RootElement.GetProperty("content")
+            .GetString()!.EndsWith(EnvoyRunner.CoverageFallback, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_held_brief_is_blocked_before_the_relay()
+    {
+        var fixture = await CreateAsync();
+        fixture.Sentinel.Decide = _ => TestSentinel.Leak;
+        var runtime = new PublicAgentRuntime(new CountingModel("unused"), new AgentShareableStores(root),
+            new RelayClientFactory(new FixedHttpClientFactory(fixture.Relay), fixture.State),
+            new OutboundFilter(new SecretScanner()), fixture.State, new NullDigestSink(), fixture.Coordinator,
+            new CommonsOutboundReview(new CommonsRuntimeOptionsResolver(fixture.Entities), fixture.Sentinel));
+
+        var result = await runtime.PostBriefAsync(new("showcase", "Laurent's address is 14 rue des Lilas"),
+            new(AgentId, "test"));
+
+        Assert.Equal("blocked", result.Decision);
+        Assert.Equal("sentinel_held", result.Reason);
+        Assert.DoesNotContain(fixture.Relay.Requests, item => item.Route == "POST /v1/posts");
+    }
+
+    [Fact]
     public async Task Restricted_mode_keeps_the_shareable_tool_free_runner()
     {
         var fixture = await CreateAsync(restrictedMode: true);
@@ -168,7 +289,8 @@ public sealed class ExternalConversationTests : IDisposable
             new AgentShareableStores(root),
             new RelayClientFactory(new FixedHttpClientFactory(fixture.Relay), fixture.State),
             new OutboundFilter(new SecretScanner()), fixture.State, new NullDigestSink(),
-            fixture.Coordinator);
+            fixture.Coordinator,
+            new CommonsOutboundReview(new CommonsRuntimeOptionsResolver(fixture.Entities), fixture.Sentinel));
 
         var result = await runtime.HandleAsync(AgentId,
             Request("restricted-ping", "Use the shareable copy only."));
@@ -201,14 +323,20 @@ public sealed class ExternalConversationTests : IDisposable
         var relay = new MultiAgentRelayHandler("Lynial", rejectFirstPost);
         var provider = new FakeExternalProvider();
         var digest = new CommonsDigestSink(state, new DigestFormatter(), state);
+        var sentinel = new TestSentinel();
         var coordinator = new PublicAgentConversationCoordinator(
             new CommonsExternalConversationStore(entities), state,
             new CommonsRuntimeOptionsResolver(entities),
             new RelayClientFactory(new FixedHttpClientFactory(relay), state),
             new OutboundFilter(new SecretScanner()), digest, state, [provider],
-            NullLogger<PublicAgentConversationCoordinator>.Instance);
+            NullLogger<PublicAgentConversationCoordinator>.Instance,
+            new CommonsOutboundReview(new CommonsRuntimeOptionsResolver(entities), sentinel))
+        {
+            OutboundRetryDelay = _ => TimeSpan.Zero,
+        };
         coordinator.Start();
-        return new(entities, state, owner, agent, relay, provider, coordinator);
+        await coordinator.WhenIdleAsync();
+        return new(entities, state, owner, agent, relay, provider, coordinator, sentinel);
     }
 
     private static EnvoyRunRequest Request(string id, string content) => new(
@@ -229,7 +357,8 @@ public sealed class ExternalConversationTests : IDisposable
         PublicAgentSettings Agent,
         MultiAgentRelayHandler Relay,
         FakeExternalProvider Provider,
-        PublicAgentConversationCoordinator Coordinator);
+        PublicAgentConversationCoordinator Coordinator,
+        TestSentinel Sentinel);
 
     private sealed class FakeExternalProvider : IExternalAgentConversationProvider
     {

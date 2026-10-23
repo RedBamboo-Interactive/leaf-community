@@ -1,0 +1,159 @@
+using System.Diagnostics;
+using System.Text.Json.Nodes;
+using Leaf.Sdk.Services;
+using Microsoft.Extensions.Logging;
+
+namespace Leaf.Plugins.LeafCommons;
+
+/// <summary>The outbound Sentinel's answer for one Leaf Community post.</summary>
+/// <param name="Allowed">The post may go out.</param>
+/// <param name="Unavailable">No usable verdict: the Sentinel is missing, failed, or did not
+/// prove it applied the outbound rubric. Never allowed (fail closed).</param>
+/// <param name="Review">What happened, for the audit, the owner and the writing session.</param>
+public sealed record CommonsOutboundVerdict(bool Allowed, bool Unavailable, JsonObject Review);
+
+/// <summary>
+/// The outbound Sentinel pass for text a Public Agent posts to Discord through the Leaf
+/// Community relay. Fail closed (Laurent, 2026-10-23): a post goes out only with an available
+/// verdict that proves the outbound direction and does not hold it. The fixed fallback notices
+/// are the only text that leaves without a review.
+/// </summary>
+public sealed class CommonsOutboundReview(
+    CommonsRuntimeOptionsResolver? runtimeOptions,
+    IUntrustedContentReview? sentinel = null,
+    ILogger<CommonsOutboundReview>? logger = null)
+{
+    public const string Audience =
+        "a public Discord channel or thread in a Leaf Community server, readable by every member who can see it";
+    private const string QualityMode = "deep-codex";
+
+    /// <summary>Used where no Sentinel is wired: every post is unavailable, so nothing leaves.</summary>
+    public static CommonsOutboundReview Unavailable { get; } = new(null);
+
+    public async Task<CommonsOutboundVerdict> ReviewAsync(
+        string agentEntityId, string threadRef, string content, string key, CancellationToken ct = default)
+    {
+        var watch = Stopwatch.StartNew();
+        UntrustedContentReviewResult? result = null;
+        if (sentinel is not null && runtimeOptions is not null)
+        {
+            try
+            {
+                // Without the quality mode the Sentinel's own configuration chooses the compute.
+                CommonsQualityMode? quality = null;
+                try { quality = await runtimeOptions.ResolveAsync(QualityMode, ct); }
+                catch (InvalidOperationException) { }
+                result = await sentinel.ReviewAsync(new UntrustedContentReviewRequest
+                {
+                    Content = content,
+                    Origin = new UntrustedContentOrigin(
+                        UntrustedContentSources.LeafCommons, threadRef, null, LeafCommonsPlugin.PluginId),
+                    Compute = quality is null ? null : new UntrustedContentCompute
+                    {
+                        Provider = quality.Provider,
+                        QualityTier = quality.QualityTier,
+                        Model = quality.Model,
+                        Effort = quality.Effort,
+                    },
+                    AgentRef = agentEntityId,
+                    Direction = UntrustedContentDirection.Outbound,
+                    Audience = Audience,
+                    IdempotencyKey = key.Length <= 200 ? key : key[..200],
+                    JobName = "Leaf Community outbound review",
+                }, ct);
+            }
+            catch (Exception error) when (!ct.IsCancellationRequested)
+            {
+                logger?.LogWarning(error, "Leaf Community outbound review {Key} failed", key);
+            }
+        }
+        watch.Stop();
+        var verdict = result is { Direction: UntrustedContentDirection.Outbound }
+            ? result.Verdict
+            : UntrustedContentVerdict.Unavailable();
+        var held = verdict.Available
+                   && (verdict.Risk == "high" || verdict.Handling == "require_private_approval");
+        var allowed = verdict.Available && !held;
+        var review = new JsonObject
+        {
+            ["direction"] = "outbound",
+            ["outcome"] = allowed ? "delivered" : "withheld",
+            ["risk"] = verdict.Risk,
+            ["signals"] = new JsonArray(verdict.Signals.Select(signal => (JsonNode?)signal).ToArray()),
+            ["handling"] = verdict.Handling,
+            ["available"] = verdict.Available,
+            ["isolation"] = verdict.Isolation,
+            ["job_id"] = result?.JobId,
+            ["elapsed_ms"] = watch.ElapsedMilliseconds,
+            ["reviewed_at"] = DateTimeOffset.UtcNow.ToString("O"),
+        };
+        return new(allowed, !verdict.Available, review);
+    }
+
+    /// <summary>Fixed notices that need no review: they are not model-written.</summary>
+    public static bool IsFixedNotice(string content)
+        => FixedNotices.Any(notice => content == notice
+            || content.StartsWith("Replying to ", StringComparison.Ordinal)
+               && content.EndsWith(": " + notice, StringComparison.Ordinal)
+               && content.Length <= "Replying to ".Length + 48 + 2 + notice.Length);
+
+    public const string WithheldNotice =
+        "I wrote a reply here but withheld it because it could have shared private information.";
+
+    public const string UnavailableNotice =
+        "I wrote a reply but couldn't send it, my safety check is unavailable. Try again in a bit.";
+
+    private static readonly string[] FixedNotices =
+    [
+        EnvoyRunner.CoverageFallback,
+        PublicAgentConversationCoordinator.SentinelUnavailableNotice,
+        WithheldNotice,
+        UnavailableNotice,
+    ];
+}
+
+/// <summary>
+/// Puts the outbound pass in front of a Public Agent's relay for the restricted-mode Envoy runner.
+/// A refused post returns <c>Accepted = false</c> with code <c>sentinel_held</c> or
+/// <c>sentinel_unavailable</c>, which the runner already answers with its fixed fallback.
+/// </summary>
+public sealed class ReviewedEnvoyRelay(
+    IEnvoyRelay inner, CommonsOutboundReview review, string agentEntityId, ICommonsAudit audit) : IEnvoyRelay
+{
+    public Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default)
+        => inner.ReadHistoryAsync(threadRef, ct);
+
+    public async Task<RelayPostResult> PostAsync(string threadRef, string content,
+        IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
+        => await RefusalAsync(threadRef, content, addresses, idempotencyKey, ct)
+           ?? await inner.PostAsync(threadRef, content, addresses, idempotencyKey, ct);
+
+    public async Task<RelayPostResult> ReplyAsync(string threadRef, string scenario, string content,
+        IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
+        => await RefusalAsync(threadRef, content, addresses, idempotencyKey, ct)
+           ?? await inner.ReplyAsync(threadRef, scenario, content, addresses, idempotencyKey, ct);
+
+    public async Task<RelayPostResult> OpenAsync(string scenario, string? threadName, string content,
+        IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
+        => await RefusalAsync(scenario, $"{threadName}\n\n{content}", addresses, idempotencyKey, ct)
+           ?? await inner.OpenAsync(scenario, threadName, content, addresses, idempotencyKey, ct);
+
+    private async Task<RelayPostResult?> RefusalAsync(string threadRef, string content,
+        IReadOnlyList<string>? addresses, string? idempotencyKey, CancellationToken ct)
+    {
+        if (CommonsOutboundReview.IsFixedNotice(content)) return null;
+        var text = addresses is { Count: > 0 } ? $"{content}\n\n[addresses] {string.Join(", ", addresses)}" : content;
+        var verdict = await review.ReviewAsync(agentEntityId, threadRef, text,
+            $"commons-envoy:{agentEntityId}:{idempotencyKey ?? threadRef}", ct);
+        await audit.RecordAsync("outbound_review", new Dictionary<string, object?>
+        {
+            ["thread"] = threadRef,
+            ["outcome"] = verdict.Review["outcome"]?.GetValue<string>(),
+            ["available"] = !verdict.Unavailable,
+            ["risk"] = verdict.Review["risk"]?.GetValue<string>(),
+        }, ct);
+        return verdict.Allowed
+            ? null
+            : new RelayPostResult(false, verdict.Unavailable ? "sentinel_unavailable" : "sentinel_held");
+    }
+}

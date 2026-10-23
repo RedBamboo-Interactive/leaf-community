@@ -277,7 +277,8 @@ public sealed class MultiAgentTests : IDisposable
     private PublicAgentRuntime Runtime(CommonsStateStore store, MultiAgentRelayHandler handler)
         => new(new CountingModel("unused"), new AgentShareableStores(root),
             new RelayClientFactory(new FixedHttpClientFactory(handler), store),
-            new OutboundFilter(new SecretScanner()), store, new NullDigestSink());
+            new OutboundFilter(new SecretScanner()), store, new NullDigestSink(),
+            outboundReview: TestSentinel.Passing(new MemoryEntityStore()));
 
     private PublicAgentCoordinator Coordinator(CommonsStateStore store,
         MemoryEntityStore entities, MultiAgentRelayHandler handler)

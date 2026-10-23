@@ -23,7 +23,11 @@ public sealed record CommonsExternalConversation(
     long CursorSequence,
     string ReplyScenario,
     string? Channel,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt)
+{
+    /// <summary>Outbound verdicts the session has not heard about yet (at most five).</summary>
+    public JsonArray? OutboundReviews { get; init; }
+}
 
 public sealed class CommonsExternalConversationStore(IEntityStore entities)
 {
@@ -70,6 +74,7 @@ public sealed class CommonsExternalConversationStore(IEntityStore entities)
             ["cursor_sequence"] = value.CursorSequence,
             ["reply_scenario"] = value.ReplyScenario,
             ["channel"] = value.Channel,
+            ["outbound_reviews"] = value.OutboundReviews?.DeepClone(),
             ["updated_at"] = now.ToString("O"),
         };
         var saved = await entities.UpsertBySlugAsync(TypeSlug,
@@ -100,7 +105,10 @@ public sealed class CommonsExternalConversationStore(IEntityStore entities)
             Text(data, "cursor_epoch"), Number(data, "cursor_sequence", 0),
             Text(data, "reply_scenario") ?? "consult_reply", Text(data, "channel"),
             DateTimeOffset.TryParse(Text(data, "updated_at"), out var updated)
-                ? updated : entity.UpdatedAt);
+                ? updated : entity.UpdatedAt)
+        {
+            OutboundReviews = data["outbound_reviews"]?.DeepClone() as JsonArray,
+        };
     }
 
     private static string? Text(JsonObject data, string key)
@@ -147,18 +155,50 @@ public sealed class PublicAgentConversationCoordinator(
     IDigestSink digests,
     ICommonsAudit audit,
     IEnumerable<IExternalAgentConversationProvider> providers,
-    ILogger<PublicAgentConversationCoordinator> logger) : IDisposable
+    ILogger<PublicAgentConversationCoordinator> logger,
+    CommonsOutboundReview? outboundReview = null) : IDisposable
 {
     private const string QualityMode = "deep-codex";
     private const int MaximumSettledText = 32_000;
+    /// <summary>Unavailable outbound reviews are asked this many times before the reply is withheld.</summary>
+    internal const int MaxOutboundReviewAttempts = 4;
+    private readonly CommonsOutboundReview review = outboundReview ?? CommonsOutboundReview.Unavailable;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> gates = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, int> reviewAttempts = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Task> running = new(StringComparer.Ordinal);
+    private readonly CancellationTokenSource stopping = new();
     private readonly List<IDisposable> subscriptions = [];
+
+    /// <summary>Delay before asking an unavailable Sentinel again (tests shorten it).</summary>
+    internal Func<int, TimeSpan> OutboundRetryDelay { get; set; } =
+        attempt => TimeSpan.FromSeconds(30 * Math.Pow(2, Math.Max(0, attempt - 1)));
 
     public void Start()
     {
         if (subscriptions.Count > 0) return;
         foreach (var provider in providers)
             subscriptions.Add(provider.SubscribeSettled(OnSettledAsync));
+        // Recovery: a reply that was waiting on the Sentinel when the process stopped is still
+        // past the saved cursor, so reading every conversation again finds it.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                foreach (var record in await conversations.ListAsync(stopping.Token))
+                    if (!string.IsNullOrWhiteSpace(record.SessionId)) Schedule(record.BindingId);
+            }
+            catch (Exception error) when (error is not OperationCanceledException)
+            {
+                logger.LogWarning(error, "Public Agent outbound recovery sweep failed");
+            }
+        });
+    }
+
+    /// <summary>Completes when no reconciliation is running or scheduled (for tests).</summary>
+    internal async Task WhenIdleAsync()
+    {
+        while (running.Values.ToArray() is { Length: > 0 } tasks)
+            await Task.WhenAll(tasks);
     }
 
     public async Task<EnvoyRunResult> SubmitAsync(
@@ -215,6 +255,7 @@ public sealed class PublicAgentConversationCoordinator(
                 ["untrusted"] = true,
                 ["relay_verified_sender"] = SenderMetadata(request.SenderProvenance),
                 ["external_behavior"] = BehaviorMetadata(),
+                ["outbound_sentinel_reviews"] = record.OutboundReviews?.DeepClone(),
             };
             var admission = await provider.SendAsync(handle, new ExternalConversationInput(
                 request.TriggerId ?? Guid.NewGuid().ToString("N"), requestor,
@@ -230,6 +271,8 @@ public sealed class PublicAgentConversationCoordinator(
                     fallback: SentinelUnavailableNotice);
                 return await FailedAsync(agent, request, "sentinel_unavailable", ct);
             }
+            if (record.OutboundReviews is { Count: > 0 })
+                record = await conversations.SaveAsync(record with { OutboundReviews = null }, ct);
             await audit.RecordAsync("external_conversation_admitted", Metadata(agent.AgentEntityId,
                 ("thread", request.ThreadRef), ("scenario", request.Kind),
                 ("binding_id", record.BindingId), ("session_id", handle.SessionId),
@@ -324,10 +367,42 @@ public sealed class PublicAgentConversationCoordinator(
         if (record is null || record.Generation != notification.Generation
             || !string.Equals(record.SessionId, notification.SessionId, StringComparison.Ordinal))
             return;
-        var gate = gates.GetOrAdd(record.BindingId, _ => new SemaphoreSlim(1, 1));
+        // The outbound review takes seconds and RedCompute's settle callback times out after
+        // ten, so delivery runs in the background; the saved cursor makes it resumable.
+        Schedule(record.BindingId);
+    }
+
+    private void Schedule(string bindingId, TimeSpan? delay = null)
+    {
+        Task? task = null;
+        task = Task.Run(async () =>
+        {
+            try
+            {
+                if (delay is { } wait) await Task.Delay(wait, stopping.Token);
+                await ReconcileBindingAsync(bindingId, stopping.Token);
+            }
+            catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
+            finally
+            {
+                running.TryRemove(new KeyValuePair<string, Task>(bindingId + task!.Id, task));
+            }
+        });
+        running[bindingId + task.Id] = task;
+    }
+
+    private async Task ReconcileBindingAsync(string bindingId, CancellationToken ct)
+    {
+        var gate = gates.GetOrAdd(bindingId, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(ct);
-        try { await ReconcileAsync(record, ct); }
-        catch (Exception error)
+        CommonsExternalConversation? record = null;
+        try
+        {
+            record = await conversations.FindByBindingIdAsync(bindingId, ct);
+            if (record is null || string.IsNullOrWhiteSpace(record.SessionId)) return;
+            await ReconcileAsync(record, ct);
+        }
+        catch (Exception error) when (record is not null && error is not OperationCanceledException)
         {
             logger.LogError(error,
                 "Public Agent settled-output reconciliation failed for {BindingId}",
@@ -353,9 +428,23 @@ public sealed class PublicAgentConversationCoordinator(
             var page = await provider.ReadSettledAsync(handle, cursor, 100, ct);
             foreach (var message in page.Messages.OrderBy(item => item.Cursor.Sequence))
             {
-                if (message.Role == "assistant" && message.Kind == "text"
-                    && !string.IsNullOrWhiteSpace(message.DeliveryContent ?? message.Content))
-                    await DeliverAsync(record, message, ct);
+                if (message.Role != "assistant" || message.Kind != "text"
+                    || string.IsNullOrWhiteSpace(message.DeliveryContent ?? message.Content))
+                    continue;
+                var (retryAfter, reviewed) = await DeliverAsync(record, message, ct);
+                if (retryAfter is { } wait)
+                {
+                    // Fail closed: the reply and everything after it wait; the cursor stays
+                    // before it, so a restart finds it again.
+                    Schedule(record.BindingId, wait);
+                    return;
+                }
+                record = await conversations.SaveAsync(record with
+                {
+                    CursorEpoch = message.Cursor.Epoch,
+                    CursorSequence = message.Cursor.Sequence,
+                    OutboundReviews = reviewed is null ? record.OutboundReviews : Append(record.OutboundReviews, reviewed),
+                }, ct);
             }
             if (page.NextCursor is not null)
             {
@@ -375,7 +464,18 @@ public sealed class PublicAgentConversationCoordinator(
         }
     }
 
-    private async Task DeliverAsync(
+    private static JsonArray Append(JsonArray? reviews, JsonObject review)
+    {
+        var items = (reviews ?? []).Select(item => item?.DeepClone()).Append(review).TakeLast(5).ToArray();
+        return new JsonArray(items);
+    }
+
+    /// <summary>
+    /// Delivers one settled reply after the local filter and the outbound Sentinel. Returns a
+    /// retry delay when the Sentinel was unavailable and the reply must wait, and the verdict
+    /// to report to the session.
+    /// </summary>
+    private async Task<(TimeSpan? RetryAfter, JsonObject? Review)> DeliverAsync(
         CommonsExternalConversation record,
         ExternalConversationMessage message,
         CancellationToken ct)
@@ -384,7 +484,7 @@ public sealed class PublicAgentConversationCoordinator(
         var agent = configuration.Agents.FirstOrDefault(item => item.Enabled
             && string.Equals(item.AgentEntityId, record.AgentEntityId,
                 StringComparison.OrdinalIgnoreCase));
-        if (agent is null) return;
+        if (agent is null) return (null, null);
         var content = message.DeliveryContent ?? message.Content ?? "";
         var decision = filter.Check(content, configuration.Owner.PersonalWords,
             configuration.Owner.Canaries, MaximumSettledText);
@@ -405,7 +505,43 @@ public sealed class PublicAgentConversationCoordinator(
             await digests.DeliverAsync(new("owner_notice",
                 $"A Public Agent answer was withheld by local rule `{decision.Rule ?? "filter_blocked"}`. The blocked text was not sent.",
                 record.ThreadRef, agent.AgentEntityId), ct);
-            return;
+            return (null, null);
+        }
+
+        var attemptKey = $"{record.BindingId}:{message.MessageUid}";
+        var verdict = await review.ReviewAsync(agent.AgentEntityId, record.ThreadRef, content,
+            $"commons-settled:{record.BindingId}:{record.Generation}:{message.MessageUid}", ct);
+        var reviewed = new JsonObject
+        {
+            ["message_uid"] = message.MessageUid,
+            ["outcome"] = verdict.Review["outcome"]?.DeepClone(),
+            ["risk"] = verdict.Review["risk"]?.DeepClone(),
+            ["signals"] = verdict.Review["signals"]?.DeepClone(),
+            ["handling"] = verdict.Review["handling"]?.DeepClone(),
+            ["available"] = verdict.Review["available"]?.DeepClone(),
+        };
+        await audit.RecordAsync("outbound_review", Metadata(agent.AgentEntityId,
+            ("thread", record.ThreadRef), ("message_uid", message.MessageUid),
+            ("outcome", verdict.Review["outcome"]?.GetValue<string>()), ("available", !verdict.Unavailable),
+            ("risk", verdict.Review["risk"]?.GetValue<string>())), ct);
+        if (verdict.Unavailable)
+        {
+            var attempts = reviewAttempts.AddOrUpdate(attemptKey, 1, (_, count) => count + 1);
+            if (attempts < MaxOutboundReviewAttempts)
+                return (OutboundRetryDelay(attempts), null);
+        }
+        reviewAttempts.TryRemove(attemptKey, out _);
+        if (!verdict.Allowed)
+        {
+            await TryFallbackSafelyAsync(agent, configuration.Owner,
+                new(record.ThreadRef, record.ReplyScenario, "", Addressed: true, Channel: record.Channel),
+                verdict.Unavailable ? "sentinel_unavailable" : "sentinel_held", ct, message.MessageUid,
+                verdict.Unavailable ? CommonsOutboundReview.UnavailableNotice : CommonsOutboundReview.WithheldNotice);
+            await digests.DeliverAsync(new("owner_notice", verdict.Unavailable
+                    ? "A Public Agent answer was withheld: the outbound safety check was unavailable. Nothing was sent."
+                    : "A Public Agent answer was withheld by the outbound safety check. The withheld text was not sent.",
+                record.ThreadRef, agent.AgentEntityId), ct);
+            return (null, reviewed);
         }
 
         var chunks = CommonsMessageChunker.Split(content,
@@ -435,7 +571,7 @@ public sealed class PublicAgentConversationCoordinator(
                 await digests.DeliverAsync(new("owner_notice",
                     $"A Public Agent answer could not be delivered: {SafeCode(posted.Code)}.",
                     record.ThreadRef, agent.AgentEntityId), ct);
-                return;
+                return (null, reviewed);
             }
         }
         await audit.RecordAsync("envoy_done", Metadata(agent.AgentEntityId,
@@ -443,6 +579,7 @@ public sealed class PublicAgentConversationCoordinator(
             ("message_uid", message.MessageUid), ("chunks", chunks.Count)), ct);
         await digests.DeliverAsync(new("consult_answer", content,
             record.ThreadRef, agent.AgentEntityId), ct);
+        return (null, reviewed);
     }
 
     public const string SentinelUnavailableNotice =
@@ -610,6 +747,7 @@ public sealed class PublicAgentConversationCoordinator(
 
     public void Dispose()
     {
+        stopping.Cancel();
         foreach (var subscription in subscriptions) subscription.Dispose();
         subscriptions.Clear();
         foreach (var gate in gates.Values) gate.Dispose();
