@@ -204,7 +204,8 @@ public sealed class PublicAgentRuntime(
         // Every post the restricted runner makes passes the outbound Sentinel first; a refusal
         // reads as a rejected post, which the runner answers with its fixed fallback.
         var runner = new EnvoyRunner(model, shareables.For(agentEntityId),
-            new ReviewedEnvoyRelay(relays.For(agentEntityId), review, agentEntityId, audit),
+            new ReviewedEnvoyRelay(relays.For(agentEntityId), review, agentEntityId, audit,
+                request.ReplyToDisplayName),
             filter, audit, configuration.Owner.PersonalWords, configuration.Owner.Canaries,
             speakerName: agent.DisplayPersona(configuration.Owner.PublicName));
         var result = await runner.RunAsync(request, ct);

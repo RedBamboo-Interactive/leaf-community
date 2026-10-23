@@ -90,12 +90,14 @@ public sealed class CommonsOutboundReview(
         return new(allowed, !verdict.Available, review);
     }
 
-    /// <summary>Fixed notices that need no review: they are not model-written.</summary>
-    public static bool IsFixedNotice(string content)
+    /// <summary>
+    /// A fixed notice that needs no review: exactly one of the notices, or exactly the channel
+    /// reply the runner builds from the trusted reply-to name. Any other prefix or suffix could be
+    /// model-written and is reviewed.
+    /// </summary>
+    public static bool IsFixedNotice(string content, string? replyToDisplayName)
         => FixedNotices.Any(notice => content == notice
-            || content.StartsWith("Replying to ", StringComparison.Ordinal)
-               && content.EndsWith(": " + notice, StringComparison.Ordinal)
-               && content.Length <= "Replying to ".Length + 48 + 2 + notice.Length);
+            || content == EnvoyRunner.ChannelReplyContent(replyToDisplayName, notice));
 
     public const string WithheldNotice =
         "I wrote a reply here but withheld it because it could have shared private information.";
@@ -118,7 +120,8 @@ public sealed class CommonsOutboundReview(
 /// <c>sentinel_unavailable</c>, which the runner already answers with its fixed fallback.
 /// </summary>
 public sealed class ReviewedEnvoyRelay(
-    IEnvoyRelay inner, CommonsOutboundReview review, string agentEntityId, ICommonsAudit audit) : IEnvoyRelay
+    IEnvoyRelay inner, CommonsOutboundReview review, string agentEntityId, ICommonsAudit audit,
+    string? replyToDisplayName = null) : IEnvoyRelay
 {
     public Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default)
         => inner.ReadHistoryAsync(threadRef, ct);
@@ -141,7 +144,9 @@ public sealed class ReviewedEnvoyRelay(
     private async Task<RelayPostResult?> RefusalAsync(string threadRef, string content,
         IReadOnlyList<string>? addresses, string? idempotencyKey, CancellationToken ct)
     {
-        if (CommonsOutboundReview.IsFixedNotice(content)) return null;
+        // Addresses are model-chosen, so a notice that carries any is reviewed too.
+        if (addresses is not { Count: > 0 } && CommonsOutboundReview.IsFixedNotice(content, replyToDisplayName))
+            return null;
         var text = addresses is { Count: > 0 } ? $"{content}\n\n[addresses] {string.Join(", ", addresses)}" : content;
         var verdict = await review.ReviewAsync(agentEntityId, threadRef, text,
             $"commons-envoy:{agentEntityId}:{idempotencyKey ?? threadRef}", ct);

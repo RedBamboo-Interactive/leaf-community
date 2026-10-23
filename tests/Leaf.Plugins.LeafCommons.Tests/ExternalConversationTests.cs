@@ -281,6 +281,133 @@ public sealed class ExternalConversationTests : IDisposable
     }
 
     [Fact]
+    public async Task A_new_settle_does_not_shorten_the_backoff_and_a_restart_keeps_the_count()
+    {
+        var fixture = await CreateAsync();
+        await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-1", "Hi"));
+        fixture.Sentinel.Decide = _ => UntrustedContentVerdict.Unavailable();
+        fixture.Coordinator.OutboundRetryDelay = _ => TimeSpan.FromHours(1);
+        fixture.Provider.Messages = [Message(1, "assistant", "text", "Here is the fix.")];
+
+        await fixture.Provider.NotifyAsync();
+        await fixture.Coordinator.WhenIdleAsync();
+        await fixture.Provider.NotifyAsync();
+        await fixture.Coordinator.WhenIdleAsync();
+
+        Assert.Single(fixture.Sentinel.Requests);
+        var store = new CommonsExternalConversationStore(fixture.Entities);
+        var waiting = await store.FindAsync(AgentId, "message:root");
+        Assert.Equal("message-1", waiting!.ReviewWaitUid);
+        Assert.Equal(1, waiting.ReviewAttempts);
+        Assert.True(waiting.ReviewNextAt > DateTimeOffset.UtcNow.AddMinutes(50));
+        Assert.DoesNotContain(fixture.Relay.Requests, item => item.Route == "POST /v1/posts");
+
+        // Restart once the wait is over: the count continues, it does not start again.
+        fixture.Coordinator.Dispose();
+        await store.SaveAsync(waiting with { ReviewNextAt = DateTimeOffset.UtcNow.AddSeconds(-1) });
+        var restarted = Restart(fixture);
+        restarted.Start();
+        await restarted.WhenIdleAsync();
+
+        Assert.Equal(PublicAgentConversationCoordinator.MaxOutboundReviewAttempts, fixture.Sentinel.Requests.Count);
+        var post = Assert.Single(fixture.Relay.Requests, item => item.Route == "POST /v1/posts");
+        using var body = JsonDocument.Parse(post.Body);
+        Assert.EndsWith(CommonsOutboundReview.UnavailableNotice, body.RootElement.GetProperty("content").GetString());
+        Assert.Null((await store.FindAsync(AgentId, "message:root"))!.ReviewWaitUid);
+    }
+
+    [Fact]
+    public async Task A_failed_reconcile_is_rescheduled()
+    {
+        var fixture = await CreateAsync();
+        await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-1", "Hi"));
+        fixture.Coordinator.ReconcileRetryDelay = _ => TimeSpan.Zero;
+        fixture.Provider.FailReads = 2;
+        fixture.Provider.Messages = [Message(1, "assistant", "text", "Here is the fix.")];
+
+        await fixture.Provider.NotifyAsync();
+        await fixture.Coordinator.WhenIdleAsync();
+
+        var post = Assert.Single(fixture.Relay.Requests, item => item.Route == "POST /v1/posts");
+        Assert.Contains("Here is the fix.", post.Body, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("Morgan", true)]
+    [InlineData("Eve", false)]
+    public async Task Only_the_exact_fixed_fallback_skips_review(string? builtFor, bool skipped)
+    {
+        var fixture = await CreateAsync();
+        var relay = new RecordingEnvoyRelay();
+        var reviewed = new ReviewedEnvoyRelay(relay,
+            new CommonsOutboundReview(new CommonsRuntimeOptionsResolver(fixture.Entities), fixture.Sentinel),
+            AgentId, fixture.State, replyToDisplayName: "Morgan");
+        var content = builtFor is null
+            ? EnvoyRunner.CoverageFallback
+            : EnvoyRunner.ChannelReplyContent(builtFor, EnvoyRunner.CoverageFallback);
+
+        await reviewed.ReplyAsync("message:root", "channel_reply", content);
+
+        Assert.Equal(skipped ? 0 : 1, fixture.Sentinel.Requests.Count);
+        Assert.Single(relay.Posts);
+    }
+
+    [Fact]
+    public async Task A_model_prefix_or_addresses_on_the_fallback_are_reviewed()
+    {
+        var fixture = await CreateAsync();
+        fixture.Sentinel.Decide = _ => TestSentinel.Leak;
+        var relay = new RecordingEnvoyRelay();
+        var reviewed = new ReviewedEnvoyRelay(relay,
+            new CommonsOutboundReview(new CommonsRuntimeOptionsResolver(fixture.Entities), fixture.Sentinel),
+            AgentId, fixture.State, replyToDisplayName: "Morgan");
+
+        var prefixed = await reviewed.ReplyAsync("message:root", "channel_reply",
+            EnvoyRunner.ChannelReplyContent("Morgan", "his PIN is 4821: " + EnvoyRunner.CoverageFallback));
+        var addressed = await reviewed.ReplyAsync("message:root", "channel_reply",
+            EnvoyRunner.CoverageFallback, ["envoy-elsewhere"]);
+
+        Assert.False(prefixed.Accepted);
+        Assert.Equal("sentinel_held", prefixed.Code);
+        Assert.False(addressed.Accepted);
+        Assert.Equal(2, fixture.Sentinel.Requests.Count);
+        Assert.Contains("[addresses] envoy-elsewhere", fixture.Sentinel.Requests[1].Content, StringComparison.Ordinal);
+        Assert.Empty(relay.Posts);
+    }
+
+    private static PublicAgentConversationCoordinator Restart(Fixture fixture)
+        => new(new CommonsExternalConversationStore(fixture.Entities), fixture.State,
+            new CommonsRuntimeOptionsResolver(fixture.Entities),
+            new RelayClientFactory(new FixedHttpClientFactory(fixture.Relay), fixture.State),
+            new OutboundFilter(new SecretScanner()),
+            new CommonsDigestSink(fixture.State, new DigestFormatter(), fixture.State), fixture.State,
+            [fixture.Provider], NullLogger<PublicAgentConversationCoordinator>.Instance,
+            new CommonsOutboundReview(new CommonsRuntimeOptionsResolver(fixture.Entities), fixture.Sentinel))
+        {
+            OutboundRetryDelay = _ => TimeSpan.Zero,
+        };
+
+    private sealed class RecordingEnvoyRelay : IEnvoyRelay
+    {
+        public List<string> Posts { get; } = [];
+
+        public Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<RelayMessage>>([]);
+
+        public Task<RelayPostResult> PostAsync(string threadRef, string content,
+            IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
+        {
+            Posts.Add(content);
+            return Task.FromResult(new RelayPostResult(true, MessageId: "m1"));
+        }
+
+        public Task<RelayPostResult> OpenAsync(string scenario, string? threadName, string content,
+            IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
+            => PostAsync(scenario, content, addresses, idempotencyKey, ct);
+    }
+
+    [Fact]
     public async Task Restricted_mode_keeps_the_shareable_tool_free_runner()
     {
         var fixture = await CreateAsync(restrictedMode: true);
@@ -370,6 +497,8 @@ public sealed class ExternalConversationTests : IDisposable
         public IReadOnlyList<ExternalConversationMessage> Messages { get; set; } = [];
         /// <summary>Answers like Nova when its inbound Sentinel review is unavailable.</summary>
         public bool Refuse { get; set; }
+        /// <summary>How many settled reads fail before they succeed.</summary>
+        public int FailReads { get; set; }
         public bool CanHandle(string agentSlugOrId) => true;
 
         public Task<ExternalConversationHandle> OpenAsync(
@@ -397,6 +526,11 @@ public sealed class ExternalConversationTests : IDisposable
             ExternalConversationHandle value, ExternalConversationCursor? after = null,
             int limit = 100, CancellationToken ct = default)
         {
+            if (FailReads > 0)
+            {
+                FailReads--;
+                throw new InvalidOperationException("RedCompute transcript is unavailable");
+            }
             var selected = Messages.Where(item => after is null
                 || item.Cursor.Epoch != after.Epoch || item.Cursor.Sequence > after.Sequence)
                 .OrderBy(item => item.Cursor.Sequence).ToArray();

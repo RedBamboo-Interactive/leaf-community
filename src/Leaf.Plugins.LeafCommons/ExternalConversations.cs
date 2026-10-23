@@ -27,6 +27,12 @@ public sealed record CommonsExternalConversation(
 {
     /// <summary>Outbound verdicts the session has not heard about yet (at most five).</summary>
     public JsonArray? OutboundReviews { get; init; }
+
+    /// <summary>The reply waiting for an unavailable Sentinel, how many times it was asked, and
+    /// when to ask again. Persisted so a restart neither resets the count nor asks early.</summary>
+    public string? ReviewWaitUid { get; init; }
+    public int ReviewAttempts { get; init; }
+    public DateTimeOffset? ReviewNextAt { get; init; }
 }
 
 public sealed class CommonsExternalConversationStore(IEntityStore entities)
@@ -75,6 +81,9 @@ public sealed class CommonsExternalConversationStore(IEntityStore entities)
             ["reply_scenario"] = value.ReplyScenario,
             ["channel"] = value.Channel,
             ["outbound_reviews"] = value.OutboundReviews?.DeepClone(),
+            ["review_wait_uid"] = value.ReviewWaitUid,
+            ["review_attempts"] = (long)value.ReviewAttempts,
+            ["review_next_at"] = value.ReviewNextAt?.ToString("O"),
             ["updated_at"] = now.ToString("O"),
         };
         var saved = await entities.UpsertBySlugAsync(TypeSlug,
@@ -108,6 +117,9 @@ public sealed class CommonsExternalConversationStore(IEntityStore entities)
                 ? updated : entity.UpdatedAt)
         {
             OutboundReviews = data["outbound_reviews"]?.DeepClone() as JsonArray,
+            ReviewWaitUid = Text(data, "review_wait_uid"),
+            ReviewAttempts = (int)Number(data, "review_attempts", 0),
+            ReviewNextAt = DateTimeOffset.TryParse(Text(data, "review_next_at"), out var nextAt) ? nextAt : null,
         };
     }
 
@@ -164,7 +176,10 @@ public sealed class PublicAgentConversationCoordinator(
     internal const int MaxOutboundReviewAttempts = 4;
     private readonly CommonsOutboundReview review = outboundReview ?? CommonsOutboundReview.Unavailable;
     private readonly ConcurrentDictionary<string, SemaphoreSlim> gates = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, int> reviewAttempts = new(StringComparer.Ordinal);
+    /// <summary>Failed reconciliations are retried this many times, then wait for the next settle or restart.</summary>
+    internal const int MaxReconcileRetries = 5;
+    private readonly ConcurrentDictionary<string, int> reconcileFailures = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> timers = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Task> running = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource stopping = new();
     private readonly List<IDisposable> subscriptions = [];
@@ -173,6 +188,10 @@ public sealed class PublicAgentConversationCoordinator(
     internal Func<int, TimeSpan> OutboundRetryDelay { get; set; } =
         attempt => TimeSpan.FromSeconds(30 * Math.Pow(2, Math.Max(0, attempt - 1)));
 
+    /// <summary>Delay before a failed reconciliation runs again (tests shorten it).</summary>
+    internal Func<int, TimeSpan> ReconcileRetryDelay { get; set; } =
+        failure => TimeSpan.FromSeconds(30 * Math.Pow(2, Math.Max(0, failure - 1)));
+
     public void Start()
     {
         if (subscriptions.Count > 0) return;
@@ -180,7 +199,7 @@ public sealed class PublicAgentConversationCoordinator(
             subscriptions.Add(provider.SubscribeSettled(OnSettledAsync));
         // Recovery: a reply that was waiting on the Sentinel when the process stopped is still
         // past the saved cursor, so reading every conversation again finds it.
-        _ = Task.Run(async () =>
+        Track("startup", async () =>
         {
             try
             {
@@ -192,6 +211,22 @@ public sealed class PublicAgentConversationCoordinator(
                 logger.LogWarning(error, "Public Agent outbound recovery sweep failed");
             }
         });
+    }
+
+    /// <summary>Runs work in the background, registered before it starts, so a run that finishes
+    /// at once never leaves a stale entry for <see cref="WhenIdleAsync"/>.</summary>
+    private void Track(string name, Func<Task> work)
+    {
+        var key = $"{name}:{Guid.NewGuid():N}";
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        running[key] = Task.Run(async () =>
+        {
+            await start.Task;
+            try { await work(); }
+            catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
+            finally { running.TryRemove(key, out _); }
+        });
+        start.SetResult();
     }
 
     /// <summary>Completes when no reconciliation is running or scheduled (for tests).</summary>
@@ -374,21 +409,23 @@ public sealed class PublicAgentConversationCoordinator(
 
     private void Schedule(string bindingId, TimeSpan? delay = null)
     {
-        Task? task = null;
-        task = Task.Run(async () =>
+        if (delay is { } wait && wait > TimeSpan.Zero)
         {
-            try
+            // A timer is not a running reconciliation, so WhenIdleAsync does not wait for it. A
+            // later timer for the same binding is dropped while an earlier one is pending.
+            var dueAt = DateTimeOffset.UtcNow + wait;
+            if (timers.TryGetValue(bindingId, out var pending) && pending <= dueAt) return;
+            timers[bindingId] = dueAt;
+            _ = Task.Run(async () =>
             {
-                if (delay is { } wait) await Task.Delay(wait, stopping.Token);
-                await ReconcileBindingAsync(bindingId, stopping.Token);
-            }
-            catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
-            finally
-            {
-                running.TryRemove(new KeyValuePair<string, Task>(bindingId + task!.Id, task));
-            }
-        });
-        running[bindingId + task.Id] = task;
+                try { await Task.Delay(wait, stopping.Token); }
+                catch (OperationCanceledException) { return; }
+                timers.TryRemove(new KeyValuePair<string, DateTimeOffset>(bindingId, dueAt));
+                Schedule(bindingId);
+            });
+            return;
+        }
+        Track(bindingId, () => ReconcileBindingAsync(bindingId, stopping.Token));
     }
 
     private async Task ReconcileBindingAsync(string bindingId, CancellationToken ct)
@@ -401,16 +438,29 @@ public sealed class PublicAgentConversationCoordinator(
             record = await conversations.FindByBindingIdAsync(bindingId, ct);
             if (record is null || string.IsNullOrWhiteSpace(record.SessionId)) return;
             await ReconcileAsync(record, ct);
+            reconcileFailures.TryRemove(bindingId, out _);
         }
-        catch (Exception error) when (record is not null && error is not OperationCanceledException)
+        catch (Exception error) when (error is not OperationCanceledException)
         {
             logger.LogError(error,
-                "Public Agent settled-output reconciliation failed for {BindingId}",
-                record.BindingId);
-            await audit.RecordAsync("external_conversation_reconcile_failed",
-                Metadata(record.AgentEntityId, ("thread", record.ThreadRef),
-                    ("reason", "settled_read_failed")), CancellationToken.None);
-            await ReportSettledFailureAsync(record, "settled_read_failed");
+                "Public Agent settled-output reconciliation failed for {BindingId}", bindingId);
+            // Nothing past the saved cursor is lost; try again with backoff, a bounded number
+            // of times, then wait for the next settle or a restart.
+            var failures = reconcileFailures.AddOrUpdate(bindingId, 1, (_, count) => count + 1);
+            if (failures <= MaxReconcileRetries)
+            {
+                Schedule(bindingId, ReconcileRetryDelay(failures));
+                return;
+            }
+            // Retries exhausted: only now tell the thread and the owner.
+            reconcileFailures.TryRemove(bindingId, out _);
+            if (record is not null)
+            {
+                await audit.RecordAsync("external_conversation_reconcile_failed",
+                    Metadata(record.AgentEntityId, ("thread", record.ThreadRef),
+                        ("reason", "settled_read_failed")), CancellationToken.None);
+                await ReportSettledFailureAsync(record, "settled_read_failed");
+            }
         }
         finally { gate.Release(); }
     }
@@ -444,6 +494,9 @@ public sealed class PublicAgentConversationCoordinator(
                     CursorEpoch = message.Cursor.Epoch,
                     CursorSequence = message.Cursor.Sequence,
                     OutboundReviews = reviewed is null ? record.OutboundReviews : Append(record.OutboundReviews, reviewed),
+                    ReviewWaitUid = null,
+                    ReviewAttempts = 0,
+                    ReviewNextAt = null,
                 }, ct);
             }
             if (page.NextCursor is not null)
@@ -508,7 +561,11 @@ public sealed class PublicAgentConversationCoordinator(
             return (null, null);
         }
 
-        var attemptKey = $"{record.BindingId}:{message.MessageUid}";
+        // A reply waiting on the Sentinel is not asked again early because another turn settled.
+        var waiting = string.Equals(record.ReviewWaitUid, message.MessageUid, StringComparison.Ordinal);
+        var now = DateTimeOffset.UtcNow;
+        if (waiting && record.ReviewNextAt is { } due && due > now)
+            return (due - now, null);
         var verdict = await review.ReviewAsync(agent.AgentEntityId, record.ThreadRef, content,
             $"commons-settled:{record.BindingId}:{record.Generation}:{message.MessageUid}", ct);
         var reviewed = new JsonObject
@@ -526,11 +583,19 @@ public sealed class PublicAgentConversationCoordinator(
             ("risk", verdict.Review["risk"]?.GetValue<string>())), ct);
         if (verdict.Unavailable)
         {
-            var attempts = reviewAttempts.AddOrUpdate(attemptKey, 1, (_, count) => count + 1);
+            var attempts = (waiting ? record.ReviewAttempts : 0) + 1;
             if (attempts < MaxOutboundReviewAttempts)
-                return (OutboundRetryDelay(attempts), null);
+            {
+                var wait = OutboundRetryDelay(attempts);
+                await conversations.SaveAsync(record with
+                {
+                    ReviewWaitUid = message.MessageUid,
+                    ReviewAttempts = attempts,
+                    ReviewNextAt = now + wait,
+                }, ct);
+                return (wait, null);
+            }
         }
-        reviewAttempts.TryRemove(attemptKey, out _);
         if (!verdict.Allowed)
         {
             await TryFallbackSafelyAsync(agent, configuration.Owner,
