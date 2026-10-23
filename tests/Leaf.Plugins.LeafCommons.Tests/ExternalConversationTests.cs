@@ -35,14 +35,14 @@ public sealed class ExternalConversationTests : IDisposable
         Assert.Equal(AgentId, opened.AgentId);
         Assert.Equal("leaf-commons", opened.Scope.Transport);
         Assert.Equal("message:root", opened.Scope.ConversationId);
-        Assert.NotNull(opened.SentinelCompute);
-        Assert.Equal("anthropic-direct", opened.SentinelCompute!.Provider);
+        // The session keeps its own quality mode; the Sentinel's compute is not Commons' choice.
+        Assert.Equal("anthropic-direct", opened.SessionCompute!.Provider);
+        Assert.Null(opened.SentinelCompute);
         Assert.Equal(2, fixture.Provider.Inputs.Count);
         Assert.All(fixture.Provider.Inputs, input =>
         {
             Assert.Equal("leaf-commons", input.Metadata!["transport"]!.GetValue<string>());
-            Assert.Equal("anthropic-direct",
-                input.Metadata["sentinel_provider"]!.GetValue<string>());
+            Assert.DoesNotContain(input.Metadata, pair => pair.Key.StartsWith("sentinel_", StringComparison.Ordinal));
         });
         Assert.Equal("discord:human-1", fixture.Provider.Inputs[0].Requestor.ExternalId);
         Assert.Equal("Morgan", fixture.Provider.Inputs[0].Requestor.DisplayName);
@@ -179,6 +179,7 @@ public sealed class ExternalConversationTests : IDisposable
             Assert.EndsWith(CommonsOutboundReview.WithheldNotice, body.RootElement.GetProperty("content").GetString());
         var request = Assert.Single(fixture.Sentinel.Requests);
         Assert.Equal(UntrustedContentDirection.Outbound, request.Direction);
+        Assert.Null(request.Compute);
         Assert.Equal(UntrustedContentSources.LeafCommons, request.Origin.Source);
         Assert.Contains(await fixture.State.ListDigestsAsync(), digest => digest.Type == "owner_notice");
 
@@ -252,7 +253,7 @@ public sealed class ExternalConversationTests : IDisposable
             new RelayClientFactory(new FixedHttpClientFactory(fixture.Relay), fixture.State),
             new OutboundFilter(new SecretScanner()), fixture.State, new NullDigestSink(),
             fixture.Coordinator,
-            new CommonsOutboundReview(new CommonsRuntimeOptionsResolver(fixture.Entities), fixture.Sentinel));
+            new CommonsOutboundReview(fixture.Sentinel));
 
         await runtime.HandleAsync(AgentId, Request("restricted-1", "What is the answer?"));
 
@@ -270,7 +271,7 @@ public sealed class ExternalConversationTests : IDisposable
         var runtime = new PublicAgentRuntime(new CountingModel("unused"), new AgentShareableStores(root),
             new RelayClientFactory(new FixedHttpClientFactory(fixture.Relay), fixture.State),
             new OutboundFilter(new SecretScanner()), fixture.State, new NullDigestSink(), fixture.Coordinator,
-            new CommonsOutboundReview(new CommonsRuntimeOptionsResolver(fixture.Entities), fixture.Sentinel));
+            new CommonsOutboundReview(fixture.Sentinel));
 
         var result = await runtime.PostBriefAsync(new("showcase", "Laurent's address is 14 rue des Lilas"),
             new(AgentId, "test"));
@@ -341,7 +342,7 @@ public sealed class ExternalConversationTests : IDisposable
         var fixture = await CreateAsync();
         var relay = new RecordingEnvoyRelay();
         var reviewed = new ReviewedEnvoyRelay(relay,
-            new CommonsOutboundReview(new CommonsRuntimeOptionsResolver(fixture.Entities), fixture.Sentinel),
+            new CommonsOutboundReview(fixture.Sentinel),
             AgentId, fixture.State, replyToDisplayName: "Morgan");
         var content = builtFor is null
             ? EnvoyRunner.CoverageFallback
@@ -360,7 +361,7 @@ public sealed class ExternalConversationTests : IDisposable
         fixture.Sentinel.Decide = _ => TestSentinel.Leak;
         var relay = new RecordingEnvoyRelay();
         var reviewed = new ReviewedEnvoyRelay(relay,
-            new CommonsOutboundReview(new CommonsRuntimeOptionsResolver(fixture.Entities), fixture.Sentinel),
+            new CommonsOutboundReview(fixture.Sentinel),
             AgentId, fixture.State, replyToDisplayName: "Morgan");
 
         var prefixed = await reviewed.ReplyAsync("message:root", "channel_reply",
@@ -383,7 +384,7 @@ public sealed class ExternalConversationTests : IDisposable
             new OutboundFilter(new SecretScanner()),
             new CommonsDigestSink(fixture.State, new DigestFormatter(), fixture.State), fixture.State,
             [fixture.Provider], NullLogger<PublicAgentConversationCoordinator>.Instance,
-            new CommonsOutboundReview(new CommonsRuntimeOptionsResolver(fixture.Entities), fixture.Sentinel))
+            new CommonsOutboundReview(fixture.Sentinel))
         {
             OutboundRetryDelay = _ => TimeSpan.Zero,
         };
@@ -417,7 +418,7 @@ public sealed class ExternalConversationTests : IDisposable
             new RelayClientFactory(new FixedHttpClientFactory(fixture.Relay), fixture.State),
             new OutboundFilter(new SecretScanner()), fixture.State, new NullDigestSink(),
             fixture.Coordinator,
-            new CommonsOutboundReview(new CommonsRuntimeOptionsResolver(fixture.Entities), fixture.Sentinel));
+            new CommonsOutboundReview(fixture.Sentinel));
 
         var result = await runtime.HandleAsync(AgentId,
             Request("restricted-ping", "Use the shareable copy only."));
@@ -457,7 +458,7 @@ public sealed class ExternalConversationTests : IDisposable
             new RelayClientFactory(new FixedHttpClientFactory(relay), state),
             new OutboundFilter(new SecretScanner()), digest, state, [provider],
             NullLogger<PublicAgentConversationCoordinator>.Instance,
-            new CommonsOutboundReview(new CommonsRuntimeOptionsResolver(entities), sentinel))
+            new CommonsOutboundReview(sentinel))
         {
             OutboundRetryDelay = _ => TimeSpan.Zero,
         };

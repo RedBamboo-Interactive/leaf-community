@@ -280,13 +280,7 @@ public sealed class PublicAgentConversationCoordinator(
                 ["generation"] = record.Generation,
                 ["owner_user_id"] = owner.OwnerUserId,
                 ["agent_id"] = agent.AgentEntityId,
-                ["sentinel_agent_id"] = agent.AgentEntityId,
                 ["session_quality_mode"] = quality.Id,
-                ["sentinel_quality_mode"] = quality.Id,
-                ["sentinel_provider"] = quality.Provider,
-                ["sentinel_quality_tier"] = quality.QualityTier,
-                ["sentinel_model"] = quality.Model,
-                ["sentinel_effort"] = quality.Effort,
                 ["untrusted"] = true,
                 ["relay_verified_sender"] = SenderMetadata(request.SenderProvenance),
                 ["external_behavior"] = BehaviorMetadata(),
@@ -392,7 +386,8 @@ public sealed class PublicAgentConversationCoordinator(
             new ExternalConversationScope("leaf-commons", LeafCommonsPlugin.PluginId,
                 record.ThreadRef, "public-discord-conversation", record.AgentEntityId),
             $"leaf-commons-open:{record.BindingId}:{record.Generation}",
-            selection, selection), ct);
+            // The Sentinel chooses its own compute (its configured tier on the default provider).
+            selection), ct);
     }
 
     private async Task OnSettledAsync(

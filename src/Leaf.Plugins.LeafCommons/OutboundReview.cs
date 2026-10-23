@@ -19,14 +19,11 @@ public sealed record CommonsOutboundVerdict(bool Allowed, bool Unavailable, Json
 /// are the only text that leaves without a review.
 /// </summary>
 public sealed class CommonsOutboundReview(
-    CommonsRuntimeOptionsResolver? runtimeOptions,
     IUntrustedContentReview? sentinel = null,
     ILogger<CommonsOutboundReview>? logger = null)
 {
     public const string Audience =
         "a public Discord channel or thread in a Leaf Community server, readable by every member who can see it";
-    private const string QualityMode = "deep-codex";
-
     /// <summary>Used where no Sentinel is wired: every post is unavailable, so nothing leaves.</summary>
     public static CommonsOutboundReview Unavailable { get; } = new(null);
 
@@ -35,26 +32,17 @@ public sealed class CommonsOutboundReview(
     {
         var watch = Stopwatch.StartNew();
         UntrustedContentReviewResult? result = null;
-        if (sentinel is not null && runtimeOptions is not null)
+        if (sentinel is not null)
         {
             try
             {
-                // Without the quality mode the Sentinel's own configuration chooses the compute.
-                CommonsQualityMode? quality = null;
-                try { quality = await runtimeOptions.ResolveAsync(QualityMode, ct); }
-                catch (InvalidOperationException) { }
+                // No compute: the Sentinel always runs on its configured tier (fast by default) on
+                // the installation's default provider.
                 result = await sentinel.ReviewAsync(new UntrustedContentReviewRequest
                 {
                     Content = content,
                     Origin = new UntrustedContentOrigin(
                         UntrustedContentSources.LeafCommons, threadRef, null, LeafCommonsPlugin.PluginId),
-                    Compute = quality is null ? null : new UntrustedContentCompute
-                    {
-                        Provider = quality.Provider,
-                        QualityTier = quality.QualityTier,
-                        Model = quality.Model,
-                        Effort = quality.Effort,
-                    },
                     AgentRef = agentEntityId,
                     Direction = UntrustedContentDirection.Outbound,
                     Audience = Audience,

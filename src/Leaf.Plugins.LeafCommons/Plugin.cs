@@ -42,7 +42,6 @@ public sealed class LeafCommonsPlugin : ILeafPlugin
         // The Sentinel is a soft dependency: without it every outbound post is unavailable and
         // nothing model-written leaves (fail closed), but Leaf Commons still runs.
         services.AddSingleton(sp => new CommonsOutboundReview(
-            sp.GetRequiredService<CommonsRuntimeOptionsResolver>(),
             sp.GetService<IUntrustedContentReview>(),
             sp.GetService<Microsoft.Extensions.Logging.ILogger<CommonsOutboundReview>>()));
         services.AddSingleton<PublicAgentConversationCoordinator>();

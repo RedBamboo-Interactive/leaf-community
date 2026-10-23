@@ -17,7 +17,7 @@ internal sealed class TestSentinel(Func<UntrustedContentReviewRequest, Untrusted
     public bool EchoDirection { get; set; } = true;
 
     public static CommonsOutboundReview Passing(MemoryEntityStore entities)
-        => new(new CommonsRuntimeOptionsResolver(entities), new TestSentinel());
+        => new(new TestSentinel());
 
     public Task<UntrustedContentReviewResult> ReviewAsync(
         UntrustedContentReviewRequest request, CancellationToken ct = default)
