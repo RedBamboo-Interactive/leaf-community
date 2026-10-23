@@ -142,6 +142,24 @@ public sealed class ExternalConversationTests : IDisposable
     }
 
     [Fact]
+    public async Task A_message_refused_for_an_unavailable_sentinel_is_not_admitted_and_gets_a_fixed_notice()
+    {
+        var fixture = await CreateAsync();
+        fixture.Provider.Refuse = true;
+
+        var result = await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner,
+            Request("ping-1", "Can you look at this?"));
+
+        Assert.Equal("failed", result.State);
+        Assert.Equal("sentinel_unavailable", result.Summary);
+        var post = Assert.Single(fixture.Relay.Requests, item => item.Route == "POST /v1/posts");
+        using var notice = JsonDocument.Parse(post.Body);
+        Assert.EndsWith(PublicAgentConversationCoordinator.SentinelUnavailableNotice,
+            notice.RootElement.GetProperty("content").GetString());
+        Assert.DoesNotContain("Can you look at this?", post.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Restricted_mode_keeps_the_shareable_tool_free_runner()
     {
         var fixture = await CreateAsync(restrictedMode: true);
@@ -221,6 +239,8 @@ public sealed class ExternalConversationTests : IDisposable
         public List<ExternalConversationOpenRequest> Opens { get; } = [];
         public List<ExternalConversationInput> Inputs { get; } = [];
         public IReadOnlyList<ExternalConversationMessage> Messages { get; set; } = [];
+        /// <summary>Answers like Nova when its inbound Sentinel review is unavailable.</summary>
+        public bool Refuse { get; set; }
         public bool CanHandle(string agentSlugOrId) => true;
 
         public Task<ExternalConversationHandle> OpenAsync(
@@ -240,7 +260,8 @@ public sealed class ExternalConversationTests : IDisposable
             handle = value;
             Inputs.Add(input);
             return Task.FromResult(new ExternalConversationAdmission(
-                $"admitted-{input.RequestId}", "delivered"));
+                $"admitted-{input.RequestId}",
+                Refuse ? ExternalConversationDispositions.RefusedSentinelUnavailable : "delivered"));
         }
 
         public Task<ExternalConversationPage> ReadSettledAsync(

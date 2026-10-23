@@ -219,6 +219,17 @@ public sealed class PublicAgentConversationCoordinator(
             var admission = await provider.SendAsync(handle, new ExternalConversationInput(
                 request.TriggerId ?? Guid.NewGuid().ToString("N"), requestor,
                 request.Content, request.Attachments ?? [], metadata), ct);
+            if (admission.Disposition == ExternalConversationDispositions.RefusedSentinelUnavailable)
+            {
+                // Fail closed (Laurent, 2026-10-23): no Sentinel verdict, no session. Leaf
+                // Commons has no inbox to retry from, so the participant is asked to try again.
+                await audit.RecordAsync("external_conversation_refused", Metadata(agent.AgentEntityId,
+                    ("thread", request.ThreadRef), ("scenario", request.Kind),
+                    ("binding_id", record.BindingId), ("reason", "sentinel_unavailable")), ct);
+                await TryFallbackSafelyAsync(agent, owner, request, "sentinel_unavailable", ct,
+                    fallback: SentinelUnavailableNotice);
+                return await FailedAsync(agent, request, "sentinel_unavailable", ct);
+            }
             await audit.RecordAsync("external_conversation_admitted", Metadata(agent.AgentEntityId,
                 ("thread", request.ThreadRef), ("scenario", request.Kind),
                 ("binding_id", record.BindingId), ("session_id", handle.SessionId),
@@ -434,20 +445,25 @@ public sealed class PublicAgentConversationCoordinator(
             record.ThreadRef, agent.AgentEntityId), ct);
     }
 
+    public const string SentinelUnavailableNotice =
+        "I can't read messages right now, my safety check is unavailable. Try again in a bit.";
+
     private async Task TryFallbackAsync(
         PublicAgentSettings agent,
         CommonsOwnerSettings owner,
         EnvoyRunRequest request,
         string reason,
         CancellationToken ct,
-        string? messageUid = null)
+        string? messageUid = null,
+        string? fallback = null)
     {
         if (!request.Addressed || string.IsNullOrWhiteSpace(request.ThreadRef)) return;
         var scenario = ReplyScenario(request.Kind);
+        fallback ??= EnvoyRunner.CoverageFallback;
         var content = scenario == "channel_reply"
             ? EnvoyRunner.ChannelReplyContent(request.ReplyToDisplayName ?? "the previous message",
-                EnvoyRunner.CoverageFallback)
-            : EnvoyRunner.CoverageFallback;
+                fallback)
+            : fallback;
         var decision = filter.Check(content, owner.PersonalWords, owner.Canaries);
         if (!decision.Allowed) return;
         var posted = await relays.For(agent.AgentEntityId).ReplyAsync(request.ThreadRef,
@@ -466,11 +482,12 @@ public sealed class PublicAgentConversationCoordinator(
         EnvoyRunRequest request,
         string reason,
         CancellationToken ct,
-        string? messageUid = null)
+        string? messageUid = null,
+        string? fallback = null)
     {
         try
         {
-            await TryFallbackAsync(agent, owner, request, reason, ct, messageUid);
+            await TryFallbackAsync(agent, owner, request, reason, ct, messageUid, fallback);
         }
         catch (Exception error) when (error is not OperationCanceledException)
         {
