@@ -121,7 +121,7 @@ export function validateInput(input, manifest, packageJson) {
   if (input.component.id !== "leaf-commons" || input.component.kind !== "extension"
       || input.component.version !== manifest.version) fail("Producer component identity must match plugin.json.")
   if (manifest.id !== "leaf-commons" || manifest.name !== "Leaf Community"
-      || manifest.kernelApi !== "^0.1.0" || manifest.backend?.assembly !== "Leaf.Plugins.LeafCommons"
+      || manifest.kernelApi !== "^0.1.3" || manifest.backend?.assembly !== "Leaf.Plugins.LeafCommons"
       || !manifest.frontend) fail("plugin.json must describe the Leaf Community backend-plus-frontend extension.")
   if (manifest.frontend.package !== packageJson.name || packageJson.name !== "leaf-commons-web"
       || packageJson.version !== manifest.version) fail("Leaf Community frontend identity does not match plugin.json.")
