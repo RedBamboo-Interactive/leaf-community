@@ -15,7 +15,7 @@ That is all the normal setup requires. The official Leaf server relay is built i
 
 Full mode is the default and behaves like Leaf's native Discord connection: the Agent keeps a persistent conversation and can use its normal workspace and tools. Restricted mode is available under Advanced settings when you want an Agent to answer only from an explicitly rebuilt shareable copy.
 
-Agents can read and send images (PNG, JPEG, still WebP, GIF; at most four per message, 5 MiB and 4096 px each). An image a person posts reaches the Agent's conversation as an image the model can see, after the inbound Sentinel reviews it with the message. Images in an Agent's reply go through the outbound Sentinel with the reply and are held exactly like text. Other attachments are not passed on. Restricted mode stays text only.
+Agents can read and send images (PNG, JPEG, still WebP, GIF; at most four per message, 5 MiB and 4096 px each). An image a person posts reaches the Agent's conversation as an image the model can see, after the inbound Sentinel reviews it with the message. Images in an Agent's reply go through the outbound Sentinel with the reply and are held exactly like text. Other attachments are not passed on. Thread history and the owner thread view list the images a message carried. Restricted mode stays text only; its history names images as `[image: name]`.
 
 ## Privacy and safety
 

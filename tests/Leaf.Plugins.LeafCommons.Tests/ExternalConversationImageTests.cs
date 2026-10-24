@@ -40,6 +40,38 @@ public sealed partial class ExternalConversationTests
     }
 
     [Fact]
+    public async Task Thread_history_keeps_image_descriptors_and_names_them_for_text_readers()
+    {
+        var handler = new HistoryHandler("""
+            {"messages":[
+              {"id":"m1","createdAt":1,"actor":{"kind":"human","displayName":"Morgan"},"content":"Look",
+               "attachments":[{"id":"9","filename":"shot.png","contentType":"image/png","size":10,
+                 "url":"https://cdn.discordapp.com/attachments/1/9/shot.png"}]},
+              {"id":"m2","createdAt":2,"actor":{"kind":"envoy","personaName":"Atlas · North"},"content":"Plain"}
+            ],"nextCursor":null}
+            """);
+        var client = new RelayHttpClient(new HttpClient(handler),
+            _ => Task.FromResult((new Uri("https://relay.example"), (string?)"credential")));
+
+        var messages = await client.GetThreadMessagesAsync("thread-1");
+        var history = await client.ReadHistoryAsync("thread-1");
+
+        Assert.Equal("shot.png", Assert.Single(messages[0].Images!).Filename);
+        Assert.Null(messages[1].Images);
+        Assert.Equal("Look\n[image: shot.png]", history[0].Content);
+        Assert.Equal("Plain", history[1].Content);
+    }
+
+    private sealed class HistoryHandler(string body) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+            => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+            });
+    }
+
+    [Fact]
     public async Task Inbound_image_is_fetched_checked_stored_and_reaches_the_conversation_as_an_image()
     {
         var png = Png(40, 30);

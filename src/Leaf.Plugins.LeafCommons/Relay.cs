@@ -18,7 +18,8 @@ public sealed record RelayThreadSummary(
     string LastSnippet, bool Unread, string? Scenario);
 public sealed record RelayThreadAuthor(string Kind, string Name, string? AvatarUrl = null, string? EnvoyId = null);
 public sealed record RelayThreadMessage(
-    string Id, DateTimeOffset At, RelayThreadAuthor Author, string Text, string? Scenario = null);
+    string Id, DateTimeOffset At, RelayThreadAuthor Author, string Text, string? Scenario = null,
+    IReadOnlyList<RelayImageAttachment>? Images = null);
 
 public sealed class RelayApiException(string reason, string message, int statusCode)
     : Exception(message)
@@ -155,7 +156,14 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
     public async Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default)
     {
         var messages = await GetThreadMessagesAsync(threadRef, ct);
-        return messages.Select(item => new RelayMessage(item.Author.Name, item.Text, item.At)).ToArray();
+        // History is text: a message's images are named, never shown, so a text-only reader knows
+        // they were there.
+        return messages.Select(item => new RelayMessage(item.Author.Name,
+            item.Images is { Count: > 0 } images
+                ? string.Join("\n", new[] { item.Text }.Concat(images.Select(image => $"[image: {image.Filename}]"))
+                    .Where(line => line.Length > 0))
+                : item.Text,
+            item.At)).ToArray();
     }
 
     public async Task<IReadOnlyList<RelayThreadSummary>> GetThreadsAsync(CancellationToken ct = default)
@@ -216,7 +224,8 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
                 Time(item, "createdAt"),
                 new(kind, name, String(actor, "avatarUrl"), String(actor, "envoyId")),
                 String(item, "content") ?? "",
-                String(item, "scenario")));
+                String(item, "scenario"),
+                ConnectorCore.ParseImages(item).Images is { Count: > 0 } images ? images : null));
         }
         return list;
     }
@@ -424,7 +433,7 @@ public sealed class ConnectorCore(
     /// never hand the connector an Asset reference, so every image an Agent sees was fetched and
     /// checked locally.
     /// </summary>
-    private static (IReadOnlyList<RelayImageAttachment> Images, int Omitted) ParseImages(JsonElement frame)
+    internal static (IReadOnlyList<RelayImageAttachment> Images, int Omitted) ParseImages(JsonElement frame)
     {
         var omitted = frame.TryGetProperty("omittedAttachments", out var omittedNode)
             && omittedNode.ValueKind == JsonValueKind.Number && omittedNode.TryGetInt32(out var count)

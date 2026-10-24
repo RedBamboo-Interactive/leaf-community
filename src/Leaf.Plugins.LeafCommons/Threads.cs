@@ -25,7 +25,8 @@ public sealed record PublicThreadMessage(
     PublicThreadAuthor Author,
     string Text,
     string? Outcome = null,
-    string? Reason = null);
+    string? Reason = null,
+    IReadOnlyList<RelayImageAttachment>? Images = null);
 
 public sealed record PublicThread(
     string ThreadRef,
@@ -104,7 +105,7 @@ public sealed class PublicNovaThreads(RelayHttpClient relay, CommonsStateStore s
             var kind = item.Author.Kind == "human" ? "human" : self ? "self" : "envoy";
             return new PublicThreadMessage(item.Id, item.At,
                 new(kind, item.Author.Name, item.Author.AvatarUrl), item.Text,
-                local?.Outcome, local?.Reason);
+                local?.Outcome, local?.Reason, item.Images);
         }).ToList();
 
         var deliveredIds = remote.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
