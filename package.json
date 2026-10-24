@@ -1,1 +1,1 @@
-{"name":"leaf-commons-local","private":true,"type":"module","scripts":{"test:e2e":"node tests/e2e-relay.mjs"}}
+{"name":"leaf-commons-local","private":true,"type":"module","scripts":{"test:e2e":"node tests/e2e-relay.mjs","test:e2e:images":"node tests/e2e-images.mjs"}}

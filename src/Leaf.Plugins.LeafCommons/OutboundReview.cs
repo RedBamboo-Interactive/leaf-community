@@ -27,9 +27,17 @@ public sealed class CommonsOutboundReview(
     /// <summary>Used where no Sentinel is wired: every post is unavailable, so nothing leaves.</summary>
     public static CommonsOutboundReview Unavailable { get; } = new(null);
 
+    /// <summary>
+    /// Reviews <paramref name="content"/> and, when given, the images that go out with it (as Leaf
+    /// Discord does): the Sentinel reads the Asset bytes and reviews them on a vision model with the
+    /// same rubric. A verdict counts only when it echoes the outbound direction and reviewed every
+    /// image sent; a reviewer that ignored the images, or could not see them, is unavailable.
+    /// </summary>
     public async Task<CommonsOutboundVerdict> ReviewAsync(
-        string agentEntityId, string threadRef, string content, string key, CancellationToken ct = default)
+        string agentEntityId, string threadRef, string content, string key, CancellationToken ct = default,
+        IReadOnlyList<ExternalConversationOutputAsset>? images = null)
     {
+        images ??= [];
         var watch = Stopwatch.StartNew();
         UntrustedContentReviewResult? result = null;
         if (sentinel is not null)
@@ -48,6 +56,7 @@ public sealed class CommonsOutboundReview(
                     Audience = Audience,
                     IdempotencyKey = key.Length <= 200 ? key : key[..200],
                     JobName = "Leaf Community outbound review",
+                    Images = images.Count == 0 ? null : images.Select(CommonsImages.ReviewImage).ToArray(),
                 }, ct);
             }
             catch (Exception error) when (!ct.IsCancellationRequested)
@@ -57,6 +66,7 @@ public sealed class CommonsOutboundReview(
         }
         watch.Stop();
         var verdict = result is { Direction: UntrustedContentDirection.Outbound }
+                      && result.ImagesReviewed == images.Count
             ? result.Verdict
             : UntrustedContentVerdict.Unavailable();
         var held = verdict.Available
@@ -72,6 +82,8 @@ public sealed class CommonsOutboundReview(
             ["available"] = verdict.Available,
             ["isolation"] = verdict.Isolation,
             ["job_id"] = result?.JobId,
+            ["images"] = images.Count,
+            ["images_reviewed"] = verdict.Available ? result?.ImagesReviewed ?? 0 : 0,
             ["elapsed_ms"] = watch.ElapsedMilliseconds,
             ["reviewed_at"] = DateTimeOffset.UtcNow.ToString("O"),
         };

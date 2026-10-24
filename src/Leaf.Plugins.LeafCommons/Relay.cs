@@ -234,17 +234,56 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
         return PostBodyAsync(body, ct);
     }
 
+    /// <summary>
+    /// A reply that carries images: multipart <c>payload_json</c> plus <c>files[n]</c>. Without
+    /// images it is the ordinary JSON reply, so a relay that predates images sees no change.
+    /// </summary>
+    public Task<RelayPostResult> ReplyAsync(string threadRef, string scenario, string content,
+        IReadOnlyList<RelayOutboundImage> images, IReadOnlyList<string>? addresses = null,
+        string? idempotencyKey = null, CancellationToken ct = default)
+    {
+        if (images.Count == 0) return ReplyAsync(threadRef, scenario, content, addresses, idempotencyKey, ct);
+        var body = new
+        {
+            scenario, threadRef, content, addresses = addresses ?? [],
+            idempotencyKey = idempotencyKey ?? Guid.NewGuid().ToString("N"),
+            images = images.Select(image => image.Description is null
+                ? new JsonObject() : new JsonObject { ["description"] = image.Description }).ToArray(),
+        };
+        return PostBodyAsync(body, ct, () =>
+        {
+            // Quoted names and a plain text payload part, as browsers send them: every multipart
+            // parser (the Workers runtime included) reads payload_json as a string field.
+            var form = new MultipartFormDataContent();
+            var payload = new ByteArrayContent(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(body)));
+            payload.Headers.ContentDisposition = new ContentDispositionHeaderValue("form-data") { Name = "\"payload_json\"" };
+            form.Add(payload);
+            for (var index = 0; index < images.Count; index++)
+            {
+                var file = new ByteArrayContent(images[index].Bytes);
+                file.Headers.ContentType = new MediaTypeHeaderValue(images[index].ContentType);
+                file.Headers.ContentDisposition = new ContentDispositionHeaderValue("form-data")
+                {
+                    Name = $"\"files[{index}]\"",
+                    FileName = $"\"image-{index + 1}\"",
+                };
+                form.Add(file);
+            }
+            return form;
+        });
+    }
+
     public Task<RelayPostResult> OpenAsync(string scenario, string? threadName, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
     {
         var body = new { scenario, threadName, content, addresses = addresses ?? [], idempotencyKey = idempotencyKey ?? Guid.NewGuid().ToString("N") };
         return PostBodyAsync(body, ct);
     }
 
-    private async Task<RelayPostResult> PostBodyAsync<T>(T body, CancellationToken ct)
+    private async Task<RelayPostResult> PostBodyAsync<T>(T body, CancellationToken ct, Func<HttpContent>? content = null)
     {
         for (var attempt = 0; ; attempt++)
         {
-            using var response = await SendAsync(HttpMethod.Post, "/v1/posts", JsonContent.Create(body), ct);
+            using var response = await SendAsync(HttpMethod.Post, "/v1/posts", content?.Invoke() ?? JsonContent.Create(body), ct);
             using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
             var root = json.RootElement; var decision = root.TryGetProperty("decision", out var d) ? d.GetString() : null;
             var result = Result(root, decision);
@@ -361,7 +400,7 @@ public sealed class ConnectorCore(
             var operation = frame.TryGetProperty("operation", out var operationNode)
                 && operationNode.ValueKind == JsonValueKind.String
                 ? operationNode.GetString() : null;
-            var attachments = ParseAttachments(frame);
+            var (images, omittedImages) = ParseImages(frame);
             var listeningOnly = type is "owner_notice" or "announcement" || (type == "event"
                 && (string.IsNullOrWhiteSpace(thread)
                     || string.Equals(channel, "announcements", StringComparison.OrdinalIgnoreCase)));
@@ -374,33 +413,49 @@ public sealed class ConnectorCore(
             else
                 await handler(new(thread, kind, content, sender, id, Addressed: type == "ping",
                     Channel: channel, ReplyToDisplayName: replyToDisplayName,
-                    Attachments: attachments), ct);
+                    Images: images, OmittedImages: omittedImages), ct);
         }
         await ack(id);
         return true;
     }
 
-    private static IReadOnlyList<ExternalConversationAttachment> ParseAttachments(JsonElement frame)
+    /// <summary>
+    /// The relay's image descriptors, bounded to four. Only descriptors are accepted: a frame can
+    /// never hand the connector an Asset reference, so every image an Agent sees was fetched and
+    /// checked locally.
+    /// </summary>
+    private static (IReadOnlyList<RelayImageAttachment> Images, int Omitted) ParseImages(JsonElement frame)
     {
+        var omitted = frame.TryGetProperty("omittedAttachments", out var omittedNode)
+            && omittedNode.ValueKind == JsonValueKind.Number && omittedNode.TryGetInt32(out var count)
+            ? Math.Clamp(count, 0, 100) : 0;
         if (!frame.TryGetProperty("attachments", out var values)
-            || values.ValueKind != JsonValueKind.Array) return [];
-        var result = new List<ExternalConversationAttachment>();
+            || values.ValueKind != JsonValueKind.Array) return ([], omitted);
+        var result = new List<RelayImageAttachment>();
         foreach (var item in values.EnumerateArray())
         {
-            if (item.ValueKind != JsonValueKind.Object) continue;
-            var id = Text(item, "id");
-            var name = Text(item, "name");
-            var mediaType = Text(item, "mediaType") ?? Text(item, "media_type");
-            var sha256 = Text(item, "sha256");
-            var scopeToken = Text(item, "scopeToken") ?? Text(item, "scope_token");
-            var size = item.TryGetProperty("size", out var sizeNode)
-                && sizeNode.TryGetInt64(out var parsedSize) ? parsedSize : -1;
-            if (id is null || name is null || mediaType is null || sha256 is null
-                || scopeToken is null || size < 0) continue;
-            result.Add(new(id, name, mediaType, size, sha256, scopeToken));
+            var id = item.ValueKind == JsonValueKind.Object ? Text(item, "id") : null;
+            var filename = id is null ? null : Text(item, "filename");
+            var contentType = id is null ? null : Text(item, "contentType");
+            var url = id is null ? null : Text(item, "url");
+            var size = id is not null && item.TryGetProperty("size", out var sizeNode)
+                && sizeNode.ValueKind == JsonValueKind.Number && sizeNode.TryGetInt64(out var parsedSize)
+                ? parsedSize : -1;
+            if (id is null || filename is null || contentType is null || url is null || size < 0
+                || result.Count >= CommonsImages.MaxImages)
+            {
+                omitted++;
+                continue;
+            }
+            result.Add(new(id, filename, contentType, size, url,
+                Dimension(item, "width"), Dimension(item, "height"), Text(item, "description")));
         }
-        return result;
+        return (result, omitted);
     }
+
+    private static int? Dimension(JsonElement element, string name)
+        => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number
+            && value.TryGetInt32(out var parsed) ? parsed : null;
 
     private static string? Text(JsonElement element, string name)
         => element.TryGetProperty(name, out var value)

@@ -168,7 +168,9 @@ public sealed class PublicAgentConversationCoordinator(
     ICommonsAudit audit,
     IEnumerable<IExternalAgentConversationProvider> providers,
     ILogger<PublicAgentConversationCoordinator> logger,
-    CommonsOutboundReview? outboundReview = null) : IDisposable
+    CommonsOutboundReview? outboundReview = null,
+    CommonsInboundImages? inboundImages = null,
+    IAssets? assets = null) : IDisposable
 {
     private const string QualityMode = "deep-codex";
     private const int MaximumSettledText = 32_000;
@@ -271,6 +273,16 @@ public sealed class PublicAgentConversationCoordinator(
                 SessionId = handle.SessionId,
             }, ct);
             var requestor = Requestor(request.SenderProvenance);
+            var requestId = request.TriggerId ?? Guid.NewGuid().ToString("N");
+            // Images are fetched and checked here and stored as RedLeaf Assets; the provider
+            // reviews them with the Sentinel and shows them to the model. Without the fetcher no
+            // image is passed on, and the session is told how many it did not get.
+            var images = request.Images is not { Count: > 0 } && request.OmittedImages == 0
+                ? new CommonsInboundImageSet([], 0)
+                : inboundImages is null
+                    ? new CommonsInboundImageSet([], (request.Images?.Count ?? 0) + request.OmittedImages)
+                    : await inboundImages.ResolveAsync(agent.AgentEntityId, requestId,
+                        request.Images ?? [], request.OmittedImages, ct);
             var quality = await runtimeOptions.ResolveAsync(QualityMode, ct);
             var metadata = new JsonObject
             {
@@ -286,9 +298,9 @@ public sealed class PublicAgentConversationCoordinator(
                 ["external_behavior"] = BehaviorMetadata(),
                 ["outbound_sentinel_reviews"] = record.OutboundReviews?.DeepClone(),
             };
+            if (images.Omitted > 0) metadata["omitted_attachments"] = images.Omitted;
             var admission = await provider.SendAsync(handle, new ExternalConversationInput(
-                request.TriggerId ?? Guid.NewGuid().ToString("N"), requestor,
-                request.Content, request.Attachments ?? [], metadata), ct);
+                requestId, requestor, request.Content, images.Attachments, metadata), ct);
             if (admission.Disposition == ExternalConversationDispositions.RefusedSentinelUnavailable)
             {
                 // Fail closed (Laurent, 2026-10-23): no Sentinel verdict, no session. Leaf
@@ -305,7 +317,8 @@ public sealed class PublicAgentConversationCoordinator(
             await audit.RecordAsync("external_conversation_admitted", Metadata(agent.AgentEntityId,
                 ("thread", request.ThreadRef), ("scenario", request.Kind),
                 ("binding_id", record.BindingId), ("session_id", handle.SessionId),
-                ("message_uid", admission.MessageUid), ("disposition", admission.Disposition)), ct);
+                ("message_uid", admission.MessageUid), ("disposition", admission.Disposition),
+                ("images", images.Attachments.Count), ("images_omitted", images.Omitted)), ct);
             return new("admitted", 0, admission.Disposition);
         }
         catch (Exception error) when (error is not OperationCanceledException)
@@ -474,7 +487,8 @@ public sealed class PublicAgentConversationCoordinator(
             foreach (var message in page.Messages.OrderBy(item => item.Cursor.Sequence))
             {
                 if (message.Role != "assistant" || message.Kind != "text"
-                    || string.IsNullOrWhiteSpace(message.DeliveryContent ?? message.Content))
+                    || (string.IsNullOrWhiteSpace(message.DeliveryContent ?? message.Content)
+                        && message.OutputAssets is not { Count: > 0 }))
                     continue;
                 var (retryAfter, reviewed) = await DeliverAsync(record, message, ct);
                 if (retryAfter is { } wait)
@@ -534,8 +548,15 @@ public sealed class PublicAgentConversationCoordinator(
                 StringComparison.OrdinalIgnoreCase));
         if (agent is null) return (null, null);
         var content = message.DeliveryContent ?? message.Content ?? "";
-        var decision = filter.Check(content, configuration.Owner.PersonalWords,
-            configuration.Owner.Canaries, MaximumSettledText);
+        var images = message.OutputAssets ?? [];
+        // Captions become Discord alt text, so the local filter reads them with the reply.
+        var captions = string.Join("\n", images.Select(image => CommonsImages.Caption(image.Description))
+            .Where(caption => caption is not null));
+        var text = captions.Length == 0 ? content : $"{content}\n{captions}";
+        // An image-only reply has no text to filter; its images still go to the Sentinel below.
+        var decision = string.IsNullOrWhiteSpace(text) && images.Count > 0
+            ? new FilterDecision(true, null)
+            : filter.Check(text, configuration.Owner.PersonalWords, configuration.Owner.Canaries, MaximumSettledText);
         await audit.RecordAsync("filter_decision", Metadata(agent.AgentEntityId,
             ("thread", record.ThreadRef), ("scenario", record.ReplyScenario),
             ("delivery", "settled-final"), ("message_uid", message.MessageUid),
@@ -561,8 +582,10 @@ public sealed class PublicAgentConversationCoordinator(
         var now = DateTimeOffset.UtcNow;
         if (waiting && record.ReviewNextAt is { } due && due > now)
             return (due - now, null);
+        // Text and images are one review, with Leaf Discord's rule: hold on high risk or
+        // require_private_approval; fail closed when unavailable or when not every image was seen.
         var verdict = await review.ReviewAsync(agent.AgentEntityId, record.ThreadRef, content,
-            $"commons-settled:{record.BindingId}:{record.Generation}:{message.MessageUid}", ct);
+            $"commons-settled:{record.BindingId}:{record.Generation}:{message.MessageUid}", ct, images);
         var reviewed = new JsonObject
         {
             ["message_uid"] = message.MessageUid,
@@ -571,11 +594,14 @@ public sealed class PublicAgentConversationCoordinator(
             ["signals"] = verdict.Review["signals"]?.DeepClone(),
             ["handling"] = verdict.Review["handling"]?.DeepClone(),
             ["available"] = verdict.Review["available"]?.DeepClone(),
+            ["images"] = images.Count,
+            ["images_reviewed"] = verdict.Review["images_reviewed"]?.DeepClone(),
         };
         await audit.RecordAsync("outbound_review", Metadata(agent.AgentEntityId,
             ("thread", record.ThreadRef), ("message_uid", message.MessageUid),
             ("outcome", verdict.Review["outcome"]?.GetValue<string>()), ("available", !verdict.Unavailable),
-            ("risk", verdict.Review["risk"]?.GetValue<string>())), ct);
+            ("risk", verdict.Review["risk"]?.GetValue<string>()), ("images", images.Count),
+            ("images_reviewed", verdict.Review["images_reviewed"]?.GetValue<int>())), ct);
         if (verdict.Unavailable)
         {
             var attempts = (waiting ? record.ReviewAttempts : 0) + 1;
@@ -604,21 +630,47 @@ public sealed class PublicAgentConversationCoordinator(
             return (null, reviewed);
         }
 
+        // Only the reviewed Assets are read, and only after the verdict allowed them.
+        var outbound = new List<RelayOutboundImage>();
+        foreach (var image in images)
+        {
+            var file = assets is null ? null : await assets.ReadAsync(image.AssetId, ct);
+            var mediaType = file is null || file.Bytes.Length > CommonsImages.MaxImageBytes
+                ? null : CommonsImages.Sniff(file.Bytes);
+            if (file is null || mediaType is null)
+            {
+                await TryFallbackSafelyAsync(agent, configuration.Owner,
+                    new(record.ThreadRef, record.ReplyScenario, "", Addressed: true, Channel: record.Channel),
+                    "image_unreadable", ct, message.MessageUid);
+                await audit.RecordAsync("envoy_failed", Metadata(agent.AgentEntityId,
+                    ("thread", record.ThreadRef), ("scenario", record.ReplyScenario),
+                    ("reason", "image_unreadable"), ("steps", 0)), ct);
+                await digests.DeliverAsync(new("owner_notice",
+                    "A Public Agent answer could not be delivered: image_unreadable.",
+                    record.ThreadRef, agent.AgentEntityId), ct);
+                return (null, reviewed);
+            }
+            outbound.Add(new(file.Bytes, mediaType, CommonsImages.Caption(image.Description)));
+        }
+
         var chunks = CommonsMessageChunker.Split(content,
             record.ReplyScenario == "channel_reply" ? 1_850 : 2_000);
+        if (chunks.Count == 0) chunks = [""];
         for (var index = 0; index < chunks.Count; index++)
         {
             var delivered = record.ReplyScenario == "channel_reply"
                 ? EnvoyRunner.ChannelReplyContent("the previous message", chunks[index])
                 : chunks[index];
+            // The images travel with the last part of the reply, after the text they illustrate.
+            IReadOnlyList<RelayOutboundImage> attached = index == chunks.Count - 1 ? outbound : [];
             var posted = await relays.For(agent.AgentEntityId).ReplyAsync(
-                record.ThreadRef, record.ReplyScenario, delivered, [],
+                record.ThreadRef, record.ReplyScenario, delivered, attached, [],
                 $"commons-settled-{message.MessageUid}-{index}", ct);
             await audit.RecordAsync("relay_post", Metadata(agent.AgentEntityId,
                 ("thread", record.ThreadRef), ("scenario", record.ReplyScenario),
                 ("delivery", "settled-final"), ("message_uid", message.MessageUid),
                 ("chunk", index), ("accepted", posted.Accepted),
-                ("code", posted.Code), ("messageId", posted.MessageId)), ct);
+                ("code", posted.Code), ("messageId", posted.MessageId), ("images", attached.Count)), ct);
             if (!posted.Accepted)
             {
                 await TryFallbackSafelyAsync(agent, configuration.Owner,
@@ -636,7 +688,7 @@ public sealed class PublicAgentConversationCoordinator(
         }
         await audit.RecordAsync("envoy_done", Metadata(agent.AgentEntityId,
             ("thread", record.ThreadRef), ("scenario", record.ReplyScenario),
-            ("message_uid", message.MessageUid), ("chunks", chunks.Count)), ct);
+            ("message_uid", message.MessageUid), ("chunks", chunks.Count), ("images", outbound.Count)), ct);
         await digests.DeliverAsync(new("consult_answer", content,
             record.ThreadRef, agent.AgentEntityId), ct);
         return (null, reviewed);

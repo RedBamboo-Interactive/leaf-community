@@ -6,7 +6,7 @@ using Xunit;
 
 namespace Leaf.Plugins.LeafCommons.Tests;
 
-public sealed class ExternalConversationTests : IDisposable
+public sealed partial class ExternalConversationTests : IDisposable
 {
     private const string AgentId = CommonsStateStore.LegacyNovaAgentId;
     private readonly string root = Path.Combine(Path.GetTempPath(),
@@ -431,7 +431,9 @@ public sealed class ExternalConversationTests : IDisposable
 
     private async Task<Fixture> CreateAsync(
         IReadOnlyList<string>? canaries = null, bool restrictedMode = false,
-        string? rejectFirstPost = null)
+        string? rejectFirstPost = null, IAssets? assets = null, HttpMessageHandler? cdn = null,
+        bool noSentinel = false, string relayBaseUrl = "https://relay.example", string credential = "credential",
+        HttpMessageHandler? liveRelay = null)
     {
         var entities = new MemoryEntityStore();
         entities.Seed(Guid.NewGuid(), "quality-mode", "Deep Codex", "deep-codex",
@@ -442,10 +444,10 @@ public sealed class ExternalConversationTests : IDisposable
                 ["model"] = "quality-model",
             });
         var state = new CommonsStateStore(entities);
-        var owner = await state.SaveOwnerSettingsAsync(new(null, "https://relay.example",
+        var owner = await state.SaveOwnerSettingsAsync(new(null, relayBaseUrl,
             "Lynial", [], canaries ?? [], [], "owner-1", "Lynial"));
         var agent = await state.SavePublicAgentAsync(new(null, AgentId, "Nova", true,
-            "credential", "active", null,
+            credential, "active", null,
             new Dictionary<string, bool> { ["showcase"] = true, ["consult"] = true }, [],
             RestrictedMode: restrictedMode));
         var relay = new MultiAgentRelayHandler("Lynial", rejectFirstPost);
@@ -455,10 +457,12 @@ public sealed class ExternalConversationTests : IDisposable
         var coordinator = new PublicAgentConversationCoordinator(
             new CommonsExternalConversationStore(entities), state,
             new CommonsRuntimeOptionsResolver(entities),
-            new RelayClientFactory(new FixedHttpClientFactory(relay), state),
+            new RelayClientFactory(new FixedHttpClientFactory(liveRelay ?? relay), state),
             new OutboundFilter(new SecretScanner()), digest, state, [provider],
             NullLogger<PublicAgentConversationCoordinator>.Instance,
-            new CommonsOutboundReview(sentinel))
+            noSentinel ? CommonsOutboundReview.Unavailable : new CommonsOutboundReview(sentinel),
+            cdn is null || assets is null ? null : new CommonsInboundImages(new HttpClient(cdn), assets, state),
+            assets)
         {
             OutboundRetryDelay = _ => TimeSpan.Zero,
         };

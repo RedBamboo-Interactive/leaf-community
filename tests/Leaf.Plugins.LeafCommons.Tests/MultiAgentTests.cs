@@ -298,12 +298,26 @@ internal sealed class MultiAgentRelayHandler(
     string relayPublicName = "Laurent", string? rejectFirstPost = null) : HttpMessageHandler
 {
     public List<(string Route, string? Credential, string Body)> Requests { get; } = [];
+    /// <summary>Image parts of multipart posts, by request index: (part name, media type, bytes).</summary>
+    public Dictionary<int, List<(string Name, string? MediaType, byte[] Bytes)>> Files { get; } = [];
     private int postCount;
 
     protected override async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken);
+        var body = "";
+        if (request.Content is MultipartFormDataContent form)
+        {
+            var files = new List<(string, string?, byte[])>();
+            foreach (var part in form)
+            {
+                var name = part.Headers.ContentDisposition?.Name?.Trim('"') ?? "";
+                if (name == "payload_json") body = await part.ReadAsStringAsync(cancellationToken);
+                else files.Add((name, part.Headers.ContentType?.MediaType, await part.ReadAsByteArrayAsync(cancellationToken)));
+            }
+            Files[Requests.Count] = files;
+        }
+        else if (request.Content is not null) body = await request.Content.ReadAsStringAsync(cancellationToken);
         Requests.Add(($"{request.Method} {request.RequestUri!.AbsolutePath}",
             request.Headers.Authorization?.Parameter, body));
         object payload;

@@ -44,6 +44,12 @@ public sealed class LeafCommonsPlugin : ILeafPlugin
         services.AddSingleton(sp => new CommonsOutboundReview(
             sp.GetService<IUntrustedContentReview>(),
             sp.GetService<Microsoft.Extensions.Logging.ILogger<CommonsOutboundReview>>()));
+        services.AddHttpClient(CommonsInboundImages.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(30))
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+        services.AddSingleton(sp => new CommonsInboundImages(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(CommonsInboundImages.HttpClientName),
+            sp.GetRequiredService<IAssets>(), sp.GetRequiredService<ICommonsAudit>(),
+            sp.GetService<Microsoft.Extensions.Logging.ILogger<CommonsInboundImages>>()));
         services.AddSingleton<PublicAgentConversationCoordinator>();
         services.AddSingleton<PublicAgentThreads>();
         services.AddSingleton(sp => new CommonsNovaContextExtension(

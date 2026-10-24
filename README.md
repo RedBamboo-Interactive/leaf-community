@@ -15,7 +15,7 @@ That is all the normal setup requires. The official Leaf server relay is built i
 
 Full mode is the default and behaves like Leaf's native Discord connection: the Agent keeps a persistent conversation and can use its normal workspace and tools. Restricted mode is available under Advanced settings when you want an Agent to answer only from an explicitly rebuilt shareable copy.
 
-Leaf Community is currently **text only**. Images and attachments are rejected.
+Agents can read and send images (PNG, JPEG, still WebP, GIF; at most four per message, 5 MiB and 4096 px each). An image a person posts reaches the Agent's conversation as an image the model can see, after the inbound Sentinel reviews it with the message. Images in an Agent's reply go through the outbound Sentinel with the reply and are held exactly like text. Other attachments are not passed on. Restricted mode stays text only.
 
 ## Privacy and safety
 
@@ -29,6 +29,7 @@ Personal-word and canary filters remain available under Advanced settings. They 
 - Every relay credential is stored on the public-Agent record keyed by immutable Agent entity ID. API projections expose only `credentialConfigured`; credentials are never keyed by mutable Agent names.
 - Personal words and canaries stay local and are never included in relay or model requests.
 - Restricted mode can search or read only files in the rebuilt plugin-owned shareable copy. Git metadata, Git-ignored files, binary/large files, secret hits, symlinks, absolute paths, and traversal are refused. Full mode uses the Agent's normal workspace and tools, with the same external-requestor privacy and authority boundary as native Leaf Discord.
+- Images are never passed on by reference. The connector fetches each image a relay ping describes itself, only over HTTPS from Discord's CDN, without redirects and within 5 MiB; it reads the type from the bytes, checks the dimensions with SkiaSharp, refuses animated WebP and stores the image as a RedLeaf Asset. Nova's provider then reviews it with the inbound Sentinel and fails closed when the review is unavailable or did not cover every image. Outbound, a settled reply's images go to the outbound Sentinel with its text; a verdict counts only when `ImagesReviewed` equals the number of images, and only then are the Asset bytes read and uploaded with the relay post. The relay checks the bytes again and strips EXIF/GPS and other metadata.
 - All relay-bound text passes the fail-closed local filter. Audit records store decisions and safe metadata, never blocked content.
 - Every model-written post (full-mode replies, restricted-mode answers, briefs) then passes the outbound Sentinel, failing closed: a held post is replaced by a fixed notice and an owner notice; when the Sentinel is unavailable a reply waits and is retried a few times, then withheld the same way. Full-mode delivery runs in the background so RedCompute's settle callback never waits on a review, and the conversation cursor stays before a waiting reply, so a restart finds it again. The writing session hears the verdicts on its next admitted message. Only the fixed notices leave unreviewed.
 - A verified execution from any Agent belonging to the owner can post a brief only when that exact Agent is public. The app name is not trusted as identity. Plugin code routes through that Agent's credential and sends title/content byte-for-byte after local filtering; the restricted-mode model is never used for briefs.
@@ -59,4 +60,4 @@ dotnet test .\LeafCommons.slnx
 
 The package is written to `dist/leaf-commons-0.1.0.leafpkg`. Building does not install or reload it.
 
-The live tool-free smoke test runs when `REDLEAF_EXECUTION_TOKEN` is present; it makes one bounded call to loopback RedCompute. The two-connector relay test starts `wrangler dev --local` from `T:\Projects\leaf-commons-relay` and uses its Discord mock.
+The live tool-free smoke test runs when `REDLEAF_EXECUTION_TOKEN` is present; it makes one bounded call to loopback RedCompute. The two-connector relay test starts `wrangler dev --local` from `T:\Projects\leaf-commons-relay` and uses its Discord mock. `node tests/e2e-images.mjs` does the same for images: it runs the C# connector against the local Worker, from a human's image on a relay ping to the provider input, and from a reviewed reply image through the Worker to the Discord mock.

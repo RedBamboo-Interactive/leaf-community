@@ -15,6 +15,8 @@ internal sealed class TestSentinel(Func<UntrustedContentReviewRequest, Untrusted
     public List<UntrustedContentReviewRequest> Requests { get; } = [];
     public Func<UntrustedContentReviewRequest, UntrustedContentVerdict> Decide { get; set; } = decide ?? (_ => Clean);
     public bool EchoDirection { get; set; } = true;
+    /// <summary>False acts like a reviewer that predates images: it reports none reviewed.</summary>
+    public bool EchoImages { get; set; } = true;
 
     public static CommonsOutboundReview Passing(MemoryEntityStore entities)
         => new(new TestSentinel());
@@ -27,6 +29,7 @@ internal sealed class TestSentinel(Func<UntrustedContentReviewRequest, Untrusted
             Decide(request), null, [], new UntrustedContentScreening(0, [], [], request.Content, []), "job", "trace")
         {
             Direction = EchoDirection ? request.Direction : UntrustedContentDirection.Inbound,
+            ImagesReviewed = EchoImages ? request.Images?.Count ?? 0 : 0,
         });
     }
 
