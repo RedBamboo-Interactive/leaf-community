@@ -207,7 +207,8 @@ public sealed class PublicAgentCoordinator(
     PublicAgentRuntime runtime,
     IPluginEvents events,
     ICommonsAudit audit,
-    ILoggerFactory loggers) : IAsyncDisposable
+    ILoggerFactory loggers,
+    CommonsAgentSkills? skills = null) : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<string, RelayConnector> connectors = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<IDisposable> subscriptions = [];
@@ -223,7 +224,46 @@ public sealed class PublicAgentCoordinator(
             await ReconcileRelayProfileSafeAsync(agent.AgentEntityId);
             await SyncAgentNameSafeAsync(agent.AgentEntityId);
         }
+        await ReconcileSkillsAsync(applicationStopping);
         await ReconcileAsync(applicationStopping);
+    }
+
+    /// <summary>
+    /// Adds or removes the Leaf Community skill on one Agent for the configured owner. Null when
+    /// skill assignment is not wired (tests) or no owner is configured yet.
+    /// </summary>
+    public async Task<SkillAssignment?> AssignSkillAsync(string agentEntityId, bool add,
+        CancellationToken ct = default)
+    {
+        if (skills is null) return null;
+        var owner = (await state.GetOwnerSettingsAsync(ct)).OwnerUserId;
+        if (string.IsNullOrWhiteSpace(owner)) return null;
+        var result = add
+            ? await skills.AddAsync(agentEntityId, owner, ct)
+            : await skills.RemoveAsync(agentEntityId, owner, ct);
+        if (result.Status is SkillAssignmentStatus.Added or SkillAssignmentStatus.Removed
+            or SkillAssignmentStatus.ManualRequired or SkillAssignmentStatus.Failed)
+            await audit.RecordAsync("agent_skill_assignment", new Dictionary<string, object?>
+                { ["agent_entity_id"] = agentEntityId, ["status"] = result.Status }, ct);
+        return result;
+    }
+
+    /// <summary>
+    /// Agents made public before Leaf Community shipped its skill get it once at startup: only
+    /// Agents the owner enabled and still owns, and only ever added. Removal stays tied to the
+    /// owner disabling an Agent or the Agent being removed.
+    /// </summary>
+    public async Task ReconcileSkillsAsync(CancellationToken ct = default)
+    {
+        if (skills is null) return;
+        var configuration = await state.GetConfigurationAsync(ct);
+        var owner = configuration.Owner.OwnerUserId;
+        if (string.IsNullOrWhiteSpace(owner)) return;
+        foreach (var agent in configuration.Agents.Where(agent => agent.Enabled))
+        {
+            if (await directory.GetAsync(agent.AgentEntityId, owner, ct) is null) continue;
+            await AssignSkillAsync(agent.AgentEntityId, add: true, ct);
+        }
     }
 
     public async Task<RelayProfile> ReconcileRelayProfileAsync(
@@ -291,8 +331,11 @@ public sealed class PublicAgentCoordinator(
         await RefreshAsync(agentEntityId, ct);
     }
 
-    public Task HandleAgentRemovedAsync(string agentEntityId, CancellationToken ct = default)
-        => SuspendAsync(agentEntityId, "agent_removed", ct);
+    public async Task HandleAgentRemovedAsync(string agentEntityId, CancellationToken ct = default)
+    {
+        await SuspendAsync(agentEntityId, "agent_removed", ct);
+        await AssignSkillAsync(agentEntityId, add: false, ct);
+    }
 
     public async Task SyncAgentNameAsync(string agentEntityId, CancellationToken ct = default)
     {
@@ -301,7 +344,7 @@ public sealed class PublicAgentCoordinator(
             agent.AgentEntityId, agentEntityId, StringComparison.OrdinalIgnoreCase));
         if (settings is null || !settings.Enabled || string.IsNullOrWhiteSpace(configuration.Owner.OwnerUserId)) return;
         var entity = await directory.GetAsync(agentEntityId, configuration.Owner.OwnerUserId, ct);
-        if (entity is null) { await SuspendAsync(agentEntityId, "agent_removed", ct); return; }
+        if (entity is null) { await HandleAgentRemovedAsync(agentEntityId, ct); return; }
         if (string.Equals(entity.Name, settings.AgentName, StringComparison.Ordinal)) return;
         var profile = string.IsNullOrWhiteSpace(settings.Credential)
             ? new RelayProfile(configuration.Owner.PublicName,

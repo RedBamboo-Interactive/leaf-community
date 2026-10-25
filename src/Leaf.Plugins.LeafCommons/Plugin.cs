@@ -56,11 +56,15 @@ public sealed class LeafCommonsPlugin : ILeafPlugin
             sp.GetRequiredKeyedService<IPluginExtensions>(PluginId),
             sp.GetRequiredService<CommonsStateStore>()));
         services.AddSingleton<PublicAgentRuntime>();
+        services.AddSingleton(sp => new CommonsAgentSkills(
+            sp.GetRequiredKeyedService<IEntityStore>(PluginId),
+            sp.GetService<Microsoft.Extensions.Logging.ILogger<CommonsAgentSkills>>()));
         services.AddSingleton(sp => new PublicAgentCoordinator(
             sp.GetRequiredService<CommonsStateStore>(), sp.GetRequiredService<AgentDirectory>(),
             sp.GetRequiredService<RelayClientFactory>(), sp.GetRequiredService<PublicAgentRuntime>(),
             sp.GetRequiredKeyedService<IPluginEvents>(PluginId), sp.GetRequiredService<ICommonsAudit>(),
-            sp.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>()));
+            sp.GetRequiredService<Microsoft.Extensions.Logging.ILoggerFactory>(),
+            sp.GetRequiredService<CommonsAgentSkills>()));
     }
     public void MapEndpoints(RouteGroupBuilder group) => CommonsEndpoints.Map(group);
     public async Task OnStartupAsync(IPluginHost host, CancellationToken ct)

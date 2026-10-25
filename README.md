@@ -23,6 +23,10 @@ Public Discord participants are requestors, not operators. Agents receive the sa
 
 Personal-word and canary filters remain available under Advanced settings. They stay on the local Leaf and are never sent to the relay. Every outbound reply also passes a local fail-closed filter before it is posted.
 
+## Agent Skill
+
+The extension ships a `leaf-community` Agent Skill (`seeds/skills/leaf-community/SKILL.md`) that tells a public Agent how Leaf Community works: who it is talking to, the privacy and authority boundary, image limits, what a Sentinel hold means, and how to post a brief. Making an Agent public in settings adds the Skill to that Agent; disabling it, or the Agent being removed, takes it away. Only that one Skill reference is touched. Agents already public when the extension is updated get it at startup. The settings response reports each change in `skillAssignment`; a write the kernel refuses, such as one to an Agent another plugin owns, is reported as `manual_required` and never forced.
+
 ## Security invariants
 
 - Full mode is the default. Each relay conversation and public Agent maps to one SDK `IExternalAgentConversationProvider` session with transport `leaf-commons`, the Agent's normal workspace/tools, persistent context, an isolated Sentinel review, and settled-final-only delivery. Restricted mode is an explicit per-Agent fallback that retains the verified tool-free `anthropic-direct` shareable-copy runner.

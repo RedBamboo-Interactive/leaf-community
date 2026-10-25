@@ -344,9 +344,23 @@ internal sealed class MemoryEntityStore : IEntityStore
         return Task.FromResult(entity);
     }
 
+    /// <summary>When set, writes to an entity another plugin owns are refused, as the kernel's
+    /// plugin-scoped store refuses them.</summary>
+    public Guid? PluginEntityId { get; set; }
+
+    private void EnforceOwnership(LeafEntity entity)
+    {
+        if (PluginEntityId is { } mine
+            && entity.Data["owner_plugin"] is JsonValue value && value.TryGetValue<string>(out var text)
+            && Guid.TryParse(text, out var owner) && owner != mine)
+            throw new InvalidOperationException(
+                $"Plugin 'leaf-commons' cannot modify entity '{entity.Slug}' -- it is owned by another plugin");
+    }
+
     public Task<LeafEntity> PatchAsync(Guid id, JsonObject dataPatch, string? name = null, CancellationToken ct = default)
     {
         var current = byId[id];
+        EnforceOwnership(current);
         var data = (JsonObject)current.Data.DeepClone();
         foreach (var item in dataPatch) data[item.Key] = item.Value?.DeepClone();
         var entity = New(id, current.TypeSlug, current.Slug, name ?? current.Name, data, current.CreatedAt);
@@ -357,6 +371,7 @@ internal sealed class MemoryEntityStore : IEntityStore
     public Task<LeafEntity> ReplaceDataAsync(Guid id, JsonObject data, string? name = null, CancellationToken ct = default)
     {
         var current = byId[id];
+        EnforceOwnership(current);
         var entity = New(id, current.TypeSlug, current.Slug, name ?? current.Name, data, current.CreatedAt);
         byId[id] = entity;
         return Task.FromResult(entity);

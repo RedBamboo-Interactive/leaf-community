@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -89,6 +90,7 @@ public static class CommonsEndpoints
             if (!requestedNameDiffers && owner.PublicName != owner.RelayConfirmedPublicName)
                 owner = await store.SaveOwnerSettingsAsync(owner with
                     { PublicName = owner.RelayConfirmedPublicName ?? owner.PublicName }, ct);
+            var assignments = new List<SkillAssignment>();
             foreach (var requested in update.Agents)
             {
                 var live = owned[requested.AgentId];
@@ -99,6 +101,9 @@ public static class CommonsEndpoints
                 {
                     await coordinator.SuspendAsync(requested.AgentId, "owner_disabled", ct);
                     current = await store.GetPublicAgentAsync(requested.AgentId, ct) ?? current;
+                    // The Leaf Community skill follows the owner's choice: disabling takes it away.
+                    if (await coordinator.AssignSkillAsync(requested.AgentId, add: false, ct) is { } removed)
+                        assignments.Add(removed);
                 }
                 var avatarChanged = current.AvatarSource != requested.AvatarSource;
                 var saved = await store.SavePublicAgentAsync(current with
@@ -113,6 +118,10 @@ public static class CommonsEndpoints
                     AvatarSyncReason = avatarChanged ? null : current.AvatarSyncReason,
                     AvatarResolvedAssetId = avatarChanged ? null : current.AvatarResolvedAssetId,
                 }, ct);
+                // An Agent the owner makes public gets the Leaf Community skill (idempotent).
+                if (saved.Enabled
+                    && await coordinator.AssignSkillAsync(saved.AgentEntityId, add: true, ct) is { } added)
+                    assignments.Add(added);
                 if (saved.Enabled && !string.IsNullOrWhiteSpace(saved.Credential))
                 {
                     try
@@ -148,8 +157,12 @@ public static class CommonsEndpoints
                 return Results.Conflict(new { error = "public_name_requires_public_agent",
                     message = "Enable and join an Agent before changing the relay public name." });
             configuration = await store.GetConfigurationAsync(ct);
-            return Results.Ok(SettingsProjection(configuration, await directory.ListAsync(ownerId, ct),
-                await avatars.IsOutfitsAvailableAsync(ct)));
+            var projection = JsonSerializer.SerializeToNode(SettingsProjection(configuration,
+                await directory.ListAsync(ownerId, ct), await avatars.IsOutfitsAvailableAsync(ct)),
+                JsonSerializerOptions.Web)!.AsObject();
+            if (assignments.Count > 0)
+                projection["skillAssignment"] = JsonSerializer.SerializeToNode(assignments, JsonSerializerOptions.Web);
+            return Results.Ok(projection);
         });
         group.MapGet("/oauth/start", async (string callback, string agentId, string? scenarios,
             bool? rejoin, IAuthContext auth, RelayClientFactory relays, CommonsStateStore store,
@@ -203,6 +216,7 @@ public static class CommonsEndpoints
                 AvatarContentHash = null,
             }, ct);
             try { await avatars.SyncAsync(saved.AgentEntityId, ct); } catch (AvatarSyncException) { }
+            await coordinator.AssignSkillAsync(saved.AgentEntityId, add: true, ct);
             await coordinator.RefreshAsync(saved.AgentEntityId, ct);
             return Results.Redirect("/extensions/leaf-commons?joined=pending");
         });
