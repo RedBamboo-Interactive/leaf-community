@@ -11,7 +11,7 @@ import {
   SettingRow,
   Switch,
 } from "@redbamboo/ui"
-import { agentConnectionLabel, customRelayBadge } from "./agent-row"
+import { agentConnectionLabel, customRelayBadge, isRelaySuspension } from "./agent-row"
 
 type Settings = {
   relayBaseUrl: string
@@ -40,6 +40,7 @@ type AgentSettings = {
   scenarioToggles: Record<string, boolean>
   shareableFolders: string[]
   restrictedMode: boolean
+  suspendedBy?: "owner" | "host" | "filter" | "membership" | null
 }
 
 const base = "/api/apps/leaf-commons"
@@ -234,7 +235,7 @@ function AgentCard({ agent, customRelay, outfitsAvailable, busy, onChange, onReb
 }) {
   const set = <K extends keyof AgentSettings>(key: K, value: AgentSettings[K]) =>
     onChange((current) => ({ ...current, [key]: value }))
-  const connection = agentConnectionLabel(agent.enabled, agent.credentialConfigured, agent.connectionStatus)
+  const connection = agentConnectionLabel(agent.enabled, agent.credentialConfigured, agent.connectionStatus, agent.suspendedBy)
   const relayBadge = customRelayBadge(customRelay)
   return <div className="rounded-xl border border-overlay-6 bg-overlay-2 p-3">
     <div className="flex items-center gap-3">
@@ -242,7 +243,7 @@ function AgentCard({ agent, customRelay, outfitsAvailable, busy, onChange, onReb
       <div className="min-w-0 flex-1">
         <strong className="block truncate text-sm">{agent.agentName}</strong>
         <span className="block truncate text-[11px] text-text-muted">{agent.persona}</span>
-        <span className={`inline-flex items-center gap-1.5 text-[11px] ${connection === "Error" ? "text-destructive" : "text-text-muted"}`}>
+        <span className={`inline-flex items-center gap-1.5 text-[11px] ${connection === "Error" || isRelaySuspension(connection) ? "text-destructive" : "text-text-muted"}`}>
           {connection}
           {relayBadge && <span className="rounded-full border border-overlay-8 bg-overlay-3 px-1.5 py-0.5 text-[9px] font-medium text-text-muted">{relayBadge}</span>}
         </span>

@@ -115,7 +115,8 @@ public sealed record PublicAgentSettings(
     string? AvatarResolvedAssetId = null,
     DateTimeOffset? AvatarSyncedAt = null,
     string? EnvoyId = null,
-    bool RestrictedMode = false)
+    bool RestrictedMode = false,
+    string? SuspendedBy = null)
 {
     public string DisplayPersona(string publicName) => $"{AgentName} \u00b7 {publicName}";
 
@@ -137,6 +138,7 @@ public sealed record PublicAgentSettings(
         shareableFolders = ShareableFolders,
         envoyId = EnvoyId,
         restrictedMode = RestrictedMode,
+        suspendedBy = SuspendedBy,
     };
 }
 
@@ -493,7 +495,8 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
             S(data, "avatar_content_hash"), S(data, "avatar_sync_status") ?? "not-synced",
             S(data, "avatar_sync_reason"), S(data, "avatar_resolved_asset_id"),
             Date(data, "avatar_synced_at"), S(data, "envoy_id"),
-            data["restricted_mode"]?.GetValue<bool?>() == true);
+            data["restricted_mode"]?.GetValue<bool?>() == true,
+            SuspensionSources.Normalize(S(data, "suspended_by")));
     }
 
     private static JsonObject AgentToData(PublicAgentSettings value) => new()
@@ -514,6 +517,7 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         ["avatar_synced_at"] = value.AvatarSyncedAt?.ToString("O"),
         ["envoy_id"] = value.EnvoyId,
         ["restricted_mode"] = value.RestrictedMode,
+        ["suspended_by"] = value.SuspendedBy,
     };
 
     private static CommonsSettings ToLegacy(CommonsOwnerSettings owner, PublicAgentSettings? agent)
@@ -623,6 +627,34 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(token));
         return "oauth-state-" + Convert.ToHexString(hash).ToLowerInvariant();
     }
+}
+
+/// <summary>
+/// Who suspended an Envoy on the relay (its <c>suspendedBy</c>). Only <see cref="Owner"/> can be
+/// lifted from here; the others need the server host.
+/// </summary>
+public static class SuspensionSources
+{
+    public const string Owner = "owner";
+    public const string Host = "host";
+    public const string Filter = "filter";
+    public const string Membership = "membership";
+
+    public static string? Normalize(string? value) => value switch
+    {
+        Owner or Host or Filter or Membership => value,
+        _ => null,
+    };
+
+    /// <summary>The source an owner notice reports, from <c>suspendedBy</c> or its reason code.</summary>
+    public static string? FromNotice(string? suspendedBy, string? reason)
+        => Normalize(suspendedBy) ?? reason switch
+        {
+            "admin_suspended" => Host,
+            "membership_suspended" => Membership,
+            "auto_suspended_filter_violations" => Filter,
+            _ => null,
+        };
 }
 
 public sealed record OAuthStateIssue(string State, DateTimeOffset ExpiresAt, string? AgentEntityId = null);

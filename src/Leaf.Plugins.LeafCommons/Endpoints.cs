@@ -62,8 +62,13 @@ public static class CommonsEndpoints
                 PersonalWords = update.PersonalWords, Canaries = update.Canaries,
                 LinkAllowlist = update.LinkAllowlist, OwnerUserId = ownerId,
             }, ct);
-            var profileAgent = configuration.Agents.FirstOrDefault(agent => agent.Enabled
-                && !string.IsNullOrWhiteSpace(agent.Credential));
+            // Read the relay profile through a connected Agent when there is one. A suspended
+            // Envoy refuses every profile read, and must not fail the whole save: resuming it is
+            // decided per Agent below.
+            var profileAgent = configuration.Agents
+                .Where(agent => agent.Enabled && !string.IsNullOrWhiteSpace(agent.Credential))
+                .OrderBy(agent => agent.ConnectionStatus == "active" ? 0 : 1)
+                .FirstOrDefault();
             if (profileAgent is not null)
             {
                 try
@@ -71,6 +76,7 @@ public static class CommonsEndpoints
                     await coordinator.ReconcileRelayProfileAsync(profileAgent.AgentEntityId, ct);
                     owner = await store.GetOwnerSettingsAsync(ct);
                 }
+                catch (RelayApiException error) when (error.Reason == "envoy_suspended") { }
                 catch (RelayApiException error)
                 {
                     return Results.Json(new { error = error.Reason, message = error.Message,
@@ -91,13 +97,48 @@ public static class CommonsEndpoints
                 owner = await store.SaveOwnerSettingsAsync(owner with
                     { PublicName = owner.RelayConfirmedPublicName ?? owner.PublicName }, ct);
             var assignments = new List<SkillAssignment>();
+            var resumes = new List<EnvoyResumeResult>();
+            async Task<PublicAgentSettings> ApplyRelayProfileAsync(
+                PublicAgentSettings agent, OwnedAgent live, bool avatarChanged)
+            {
+                var profile = await relays.For(agent.AgentEntityId).PatchProfileAsync(
+                    publicNamePending ? update.PublicName : null,
+                    live.Name, agent.ScenarioToggles, ct);
+                publicNamePending = false;
+                if (!string.Equals(owner.PublicName, profile.PublicName, StringComparison.Ordinal)
+                    || !string.Equals(owner.RelayConfirmedPublicName, profile.PublicName,
+                        StringComparison.Ordinal))
+                    owner = await store.SaveOwnerSettingsAsync(owner with
+                        { PublicName = profile.PublicName,
+                            RelayConfirmedPublicName = profile.PublicName }, ct);
+                agent = await store.SavePublicAgentAsync(agent with
+                    { AgentName = profile.AgentName ?? live.Name }, ct);
+                if (avatarChanged) await avatars.SyncAsync(agent.AgentEntityId, ct);
+                return agent;
+            }
             foreach (var requested in update.Agents)
             {
                 var live = owned[requested.AgentId];
                 var current = await store.GetPublicAgentAsync(requested.AgentId, ct)
                     ?? new(null, requested.AgentId, live.Name, false, null, "disconnected",
                         null, new Dictionary<string, bool>(), []);
-                if (!requested.Enabled && current.Enabled)
+                var enable = requested.Enabled;
+                // Switching an Agent back on first lifts the owner's own relay suspension, before
+                // anything is saved, patched or connected. A suspension the owner cannot lift
+                // (host, filter, membership) keeps this Agent off and is reported per Agent, so
+                // the rest of the save still applies. An Agent already on but stuck on a
+                // suspended Envoy gets the same single attempt.
+                if (enable && !string.IsNullOrWhiteSpace(current.Credential)
+                    && PublicAgentCoordinator.NeedsResume(current))
+                {
+                    var resume = await coordinator.ResumeSuspendedAsync(requested.AgentId, ct);
+                    resumes.Add(resume);
+                    if (resume.Status == EnvoyResumeStatuses.Suspended
+                        || (resume.Status == EnvoyResumeStatuses.Failed && !current.Enabled))
+                        enable = false;
+                    current = await store.GetPublicAgentAsync(requested.AgentId, ct) ?? current;
+                }
+                if (!enable && current.Enabled)
                 {
                     await coordinator.SuspendAsync(requested.AgentId, "owner_disabled", ct);
                     current = await store.GetPublicAgentAsync(requested.AgentId, ct) ?? current;
@@ -108,7 +149,7 @@ public static class CommonsEndpoints
                 var avatarChanged = current.AvatarSource != requested.AvatarSource;
                 var saved = await store.SavePublicAgentAsync(current with
                 {
-                    Enabled = requested.Enabled, AgentName = live.Name,
+                    Enabled = enable, AgentName = live.Name,
                     ScenarioToggles = requested.ScenarioToggles,
                     ShareableFolders = requested.ShareableFolders,
                     RestrictedMode = requested.RestrictedMode,
@@ -118,27 +159,22 @@ public static class CommonsEndpoints
                     AvatarSyncReason = avatarChanged ? null : current.AvatarSyncReason,
                     AvatarResolvedAssetId = avatarChanged ? null : current.AvatarResolvedAssetId,
                 }, ct);
-                // An Agent the owner makes public gets the Leaf Community skill (idempotent).
-                if (saved.Enabled
-                    && await coordinator.AssignSkillAsync(saved.AgentEntityId, add: true, ct) is { } added)
-                    assignments.Add(added);
                 if (saved.Enabled && !string.IsNullOrWhiteSpace(saved.Credential))
                 {
                     try
                     {
-                        var profile = await relays.For(saved.AgentEntityId).PatchProfileAsync(
-                            publicNamePending ? update.PublicName : null,
-                            live.Name, saved.ScenarioToggles, ct);
-                        publicNamePending = false;
-                        if (!string.Equals(owner.PublicName, profile.PublicName, StringComparison.Ordinal)
-                            || !string.Equals(owner.RelayConfirmedPublicName, profile.PublicName,
-                                StringComparison.Ordinal))
-                            owner = await store.SaveOwnerSettingsAsync(owner with
-                                { PublicName = profile.PublicName,
-                                    RelayConfirmedPublicName = profile.PublicName }, ct);
-                        saved = await store.SavePublicAgentAsync(saved with
-                            { AgentName = profile.AgentName ?? live.Name }, ct);
-                        if (avatarChanged) await avatars.SyncAsync(saved.AgentEntityId, ct);
+                        try { saved = await ApplyRelayProfileAsync(saved, live, avatarChanged); }
+                        catch (RelayApiException error) when (error.Reason == "envoy_suspended"
+                            && resumes.All(item => item.AgentId != saved.AgentEntityId))
+                        {
+                            // Locally on, but the relay suspended its Envoy: one resume attempt,
+                            // then the profile once more if it was the owner's own suspension.
+                            var resume = await coordinator.ResumeSuspendedAsync(saved.AgentEntityId, ct);
+                            resumes.Add(resume);
+                            saved = await store.GetPublicAgentAsync(saved.AgentEntityId, ct) ?? saved;
+                            if (resume.Status == EnvoyResumeStatuses.Resumed)
+                                saved = await ApplyRelayProfileAsync(saved, live, avatarChanged);
+                        }
                     }
                     catch (RelayApiException error)
                     {
@@ -151,6 +187,11 @@ public static class CommonsEndpoints
                             agentId = saved.AgentEntityId }, statusCode: 422);
                     }
                 }
+                // An Agent the owner makes public gets the Leaf Community skill (idempotent), once
+                // the relay accepted it.
+                if (saved.Enabled
+                    && await coordinator.AssignSkillAsync(saved.AgentEntityId, add: true, ct) is { } added)
+                    assignments.Add(added);
                 await coordinator.RefreshAsync(saved.AgentEntityId, ct);
             }
             if (publicNamePending)
@@ -162,6 +203,8 @@ public static class CommonsEndpoints
                 JsonSerializerOptions.Web)!.AsObject();
             if (assignments.Count > 0)
                 projection["skillAssignment"] = JsonSerializer.SerializeToNode(assignments, JsonSerializerOptions.Web);
+            if (resumes.Count > 0)
+                projection["relayResume"] = JsonSerializer.SerializeToNode(resumes, JsonSerializerOptions.Web);
             return Results.Ok(projection);
         });
         group.MapGet("/oauth/start", async (string callback, string agentId, string? scenarios,
@@ -214,6 +257,7 @@ public static class CommonsEndpoints
                 EnvoyId = exchange.EnvoyId,
                 Avatar = exchange.AvatarObjectKey,
                 AvatarContentHash = null,
+                SuspendedBy = null,
             }, ct);
             try { await avatars.SyncAsync(saved.AgentEntityId, ct); } catch (AvatarSyncException) { }
             await coordinator.AssignSkillAsync(saved.AgentEntityId, add: true, ct);
@@ -398,6 +442,7 @@ public static class CommonsEndpoints
                     scenarioToggles = value?.ScenarioToggles ?? new Dictionary<string, bool>(),
                     shareableFolders = value?.ShareableFolders ?? [],
                     restrictedMode = value?.RestrictedMode ?? false,
+                    suspendedBy = value?.SuspendedBy,
                 };
             }).ToArray(),
         };

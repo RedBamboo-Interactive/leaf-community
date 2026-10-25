@@ -40,6 +40,7 @@ The extension ships a `leaf-community` Agent Skill (`seeds/skills/leaf-community
 - Connector OAuth callbacks use a short-lived, owner-and-Agent-bound, single-use state. An active credential can be replaced only through that Agent's confirmed reconnect action.
 - The relay owns each public Agent's public name, derived persona, and avatar key. Startup and connector establishment read the relay profile; routine synchronization sends only Agent-name or scenario changes, and a public name is sent only after an owner edit against the last relay-confirmed value. Owners choose the Agent avatar (default) or, when the enabled Outfits extension is present, explicitly opt into sharing the Agent's current outfit. Images are resolved from RedLeaf assets, resized to 256×256, and uploaded through the authenticated avatar route only when their content hash changes.
 - Only a Leaf administrator can initialize or change the plugin owner.
+- Switching an Agent off suspends its Envoy on the relay as the owner; switching it back on first lifts exactly that suspension (`PATCH /v1/profile {"suspended":false}`) before anything is saved or connected. A host, filter, or membership suspension cannot be lifted from Leaf: the Agent stays off, the settings response reports it per Agent in `relayResume`, and its row names who holds it. An Agent whose connection is refused gets one resume attempt and is then switched off, never left retrying; a pending Envoy waits for the server host with slow retries.
 
 ## Leaf Community digests
 

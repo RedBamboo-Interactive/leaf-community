@@ -10,6 +10,18 @@ namespace Leaf.Plugins.LeafCommons;
 
 public sealed record OwnedAgent(string AgentEntityId, string Name, string? AvatarUrl);
 
+/// <summary>What lifting an Agent's relay suspension did, per Agent, for the settings response.</summary>
+/// <param name="Status"><c>resumed</c>; <c>suspended</c> (a host, filter or membership suspension
+/// is still in place, so the Agent stays off); or <c>failed</c> (the relay could not be asked).</param>
+public sealed record EnvoyResumeResult(string AgentId, string Status, string? SuspendedBy = null, string? Reason = null);
+
+public static class EnvoyResumeStatuses
+{
+    public const string Resumed = "resumed";
+    public const string Suspended = "suspended";
+    public const string Failed = "failed";
+}
+
 public sealed class AgentDirectory(IEntityStore entities)
 {
     public async Task<IReadOnlyList<OwnedAgent>> ListAsync(string ownerUserId, CancellationToken ct = default)
@@ -211,8 +223,15 @@ public sealed class PublicAgentCoordinator(
     CommonsAgentSkills? skills = null) : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<string, RelayConnector> connectors = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Agents whose suspension was already asked to lift since they last connected: a
+    /// refused connection never asks twice, so a suspended Envoy cannot cause a retry storm.</summary>
+    private readonly ConcurrentDictionary<string, byte> resumeAttempted = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<IDisposable> subscriptions = [];
+    private readonly ILogger logger = loggers.CreateLogger<PublicAgentCoordinator>();
     private CancellationToken stopping;
+
+    /// <summary>A refused connection to a pending Envoy is retried this often.</summary>
+    internal TimeSpan PendingRetryDelay { get; set; } = TimeSpan.FromMinutes(5);
 
     public async Task StartAsync(CancellationToken applicationStopping)
     {
@@ -221,6 +240,12 @@ public sealed class PublicAgentCoordinator(
         subscriptions.Add(events.Subscribe("entity.deleted", OnEntityDeletedAsync));
         foreach (var agent in await state.ListPublicAgentsAsync(enabledOnly: true, ct: applicationStopping))
         {
+            // An Agent left enabled on a suspended Envoy (switched off, then on, before resuming
+            // existed) gets one attempt to lift it instead of looping on refused connections.
+            if (!string.IsNullOrWhiteSpace(agent.Credential) && NeedsResume(agent)
+                && (await ResumeSuspendedAsync(agent.AgentEntityId, applicationStopping)).Status
+                    == EnvoyResumeStatuses.Suspended)
+                continue;
             await ReconcileRelayProfileSafeAsync(agent.AgentEntityId);
             await SyncAgentNameSafeAsync(agent.AgentEntityId);
         }
@@ -263,6 +288,124 @@ public sealed class PublicAgentCoordinator(
         {
             if (await directory.GetAsync(agent.AgentEntityId, owner, ct) is null) continue;
             await AssignSkillAsync(agent.AgentEntityId, add: true, ct);
+        }
+    }
+
+    /// <summary>
+    /// The local state of an Agent whose Envoy may be suspended on the relay: switched off here,
+    /// or enabled but stuck reconnecting. Asking to resume an Envoy that is not suspended is a
+    /// no-op on the relay.
+    /// </summary>
+    internal bool HasConnector(string agentEntityId) => connectors.ContainsKey(agentEntityId);
+
+    public static bool NeedsResume(PublicAgentSettings agent)
+        => agent.ConnectionStatus is "suspended" or "reconnecting";
+
+    /// <summary>
+    /// Asks the relay once to lift the owner's own suspension of this Agent's Envoy. A refusal
+    /// means a host, filter or membership suspension is in place: the Agent is switched off here
+    /// with that source, its connector stops and its skill is removed.
+    /// </summary>
+    public async Task<EnvoyResumeResult> ResumeSuspendedAsync(string agentEntityId, CancellationToken ct = default)
+    {
+        resumeAttempted[agentEntityId] = 0;
+        try
+        {
+            var status = await relays.For(agentEntityId).ResumeAsync(ct);
+            var current = await state.GetPublicAgentAsync(agentEntityId, ct);
+            if (current is not null)
+                await state.SavePublicAgentAsync(current with
+                {
+                    ConnectionStatus = status == "pending" ? "pending approval" : "reconnecting",
+                    SuspendedBy = null,
+                }, ct);
+            await audit.RecordAsync("envoy_resumed", new Dictionary<string, object?>
+                { ["agent_entity_id"] = agentEntityId, ["relay_status"] = status }, ct);
+            return new(agentEntityId, EnvoyResumeStatuses.Resumed);
+        }
+        catch (RelayApiException error) when (error.Reason == "envoy_suspended")
+        {
+            return await MarkSuspendedAsync(agentEntityId, ct);
+        }
+        catch (RelayApiException error)
+        {
+            await audit.RecordAsync("envoy_resume_failed", new Dictionary<string, object?>
+                { ["agent_entity_id"] = agentEntityId, ["reason"] = error.Reason }, ct);
+            return new(agentEntityId, EnvoyResumeStatuses.Failed, Reason: error.Reason);
+        }
+        catch (Exception error) when (error is HttpRequestException
+            || (error is TaskCanceledException && !ct.IsCancellationRequested))
+        {
+            await audit.RecordAsync("envoy_resume_failed", new Dictionary<string, object?>
+                { ["agent_entity_id"] = agentEntityId, ["reason"] = "relay_unreachable" }, ct);
+            return new(agentEntityId, EnvoyResumeStatuses.Failed, Reason: "relay_unreachable");
+        }
+    }
+
+    /// <summary>
+    /// The relay keeps this Envoy suspended: switch the Agent off here, record who suspended it
+    /// (the source an owner notice reported, else the host, which also covers suspensions from
+    /// before sources existed), stop its connector and remove its skill.
+    /// </summary>
+    private async Task<EnvoyResumeResult> MarkSuspendedAsync(string agentEntityId, CancellationToken ct)
+    {
+        var current = await state.GetPublicAgentAsync(agentEntityId, ct);
+        var by = current?.SuspendedBy is SuspensionSources.Host or SuspensionSources.Filter or SuspensionSources.Membership
+            ? current.SuspendedBy : SuspensionSources.Host;
+        if (current is not null)
+            await state.SavePublicAgentAsync(current with
+                { Enabled = false, ConnectionStatus = "suspended", SuspendedBy = by }, ct);
+        await audit.RecordAsync("envoy_resume_refused", new Dictionary<string, object?>
+            { ["agent_entity_id"] = agentEntityId, ["suspended_by"] = by }, ct);
+        logger.LogWarning("Leaf Community Agent {Agent} is suspended on the relay ({Source}); switched off",
+            agentEntityId, by);
+        await AssignSkillAsync(agentEntityId, add: false, ct);
+        if (connectors.TryRemove(agentEntityId, out var connector)) await connector.DisposeAsync();
+        return new(agentEntityId, EnvoyResumeStatuses.Suspended, by, "envoy_suspended");
+    }
+
+    /// <summary>
+    /// The relay refused this Agent's WebSocket. Reads why (one empty profile patch) and returns
+    /// the next attempt's delay, or null to stop: a suspended Envoy gets one resume attempt and is
+    /// then switched off; a pending one waits for the host and is retried slowly.
+    /// </summary>
+    internal async Task<TimeSpan?> HandleConnectRefusedAsync(string agentEntityId, int statusCode, CancellationToken ct)
+    {
+        var settings = await state.GetPublicAgentAsync(agentEntityId, ct);
+        if (settings is null || !settings.Enabled) return null;
+        if (statusCode == 401) return PendingRetryDelay; // the credential was replaced or revoked
+        string? relayStatus;
+        try { relayStatus = await relays.For(agentEntityId).ReadStatusAsync(ct); }
+        catch (RelayApiException error) when (error.Reason == "envoy_suspended") { relayStatus = "suspended"; }
+        catch (Exception error) when (error is RelayApiException or HttpRequestException
+            || (error is TaskCanceledException && !ct.IsCancellationRequested))
+        {
+            return TimeSpan.FromSeconds(30);
+        }
+        switch (relayStatus)
+        {
+            case "suspended":
+                if (!resumeAttempted.TryAdd(agentEntityId, 0))
+                {
+                    await MarkSuspendedAsync(agentEntityId, ct);
+                    return null;
+                }
+                var resumed = await ResumeSuspendedAsync(agentEntityId, ct);
+                return resumed.Status switch
+                {
+                    EnvoyResumeStatuses.Resumed => TimeSpan.Zero,
+                    EnvoyResumeStatuses.Suspended => null,
+                    _ => TimeSpan.FromSeconds(30),
+                };
+            case "pending":
+                if (settings.ConnectionStatus != "pending approval")
+                {
+                    logger.LogWarning("Leaf Community Agent {Agent} is waiting for the server host", agentEntityId);
+                    await state.SavePublicAgentAsync(settings with { ConnectionStatus = "pending approval" }, ct);
+                }
+                return PendingRetryDelay;
+            default:
+                return TimeSpan.FromSeconds(30);
         }
     }
 
@@ -315,9 +458,14 @@ public sealed class PublicAgentCoordinator(
             await RefreshAsync(agentEntityId, ct);
             return;
         }
+        string? suspendedBy = null;
         if (!string.IsNullOrWhiteSpace(settings.Credential))
         {
-            try { await relays.For(agentEntityId).SuspendAsync(ct); }
+            try
+            {
+                await relays.For(agentEntityId).SuspendAsync(ct);
+                suspendedBy = SuspensionSources.Owner;
+            }
             catch (RelayApiException error)
             {
                 await audit.RecordAsync("envoy_suspend_failed", new Dictionary<string, object?>
@@ -325,7 +473,7 @@ public sealed class PublicAgentCoordinator(
             }
         }
         await state.SavePublicAgentAsync(settings with
-            { Enabled = false, ConnectionStatus = "suspended" }, ct);
+            { Enabled = false, ConnectionStatus = "suspended", SuspendedBy = suspendedBy ?? settings.SuspendedBy }, ct);
         await audit.RecordAsync("envoy_suspended", new Dictionary<string, object?>
             { ["agent_entity_id"] = agentEntityId, ["reason"] = reason }, ct);
         await RefreshAsync(agentEntityId, ct);
@@ -371,7 +519,12 @@ public sealed class PublicAgentCoordinator(
             return (new Uri(CommonsRelayDefaults.EffectiveBaseUrl(configuration.Owner.RelayBaseUrl)), agent.Credential);
         }, core, (status, ct) => SetStatusAsync(agentEntityId, status, ct),
             loggers.CreateLogger<RelayConnector>(),
-            ct => ReconcileRelayProfileAsync(agentEntityId, ct));
+            async ct =>
+            {
+                resumeAttempted.TryRemove(agentEntityId, out _);
+                await ReconcileRelayProfileAsync(agentEntityId, ct);
+            },
+            (statusCode, ct) => HandleConnectRefusedAsync(agentEntityId, statusCode, ct));
     }
 
     private async Task SetStatusAsync(string agentEntityId, string status, CancellationToken ct)
@@ -379,8 +532,12 @@ public sealed class PublicAgentCoordinator(
         var current = await state.GetPublicAgentAsync(agentEntityId, ct);
         if (current is null || !current.Enabled) return;
         if (status == "reconnecting" && current.ConnectionStatus == "pending approval") return;
-        if (current.ConnectionStatus != status)
-            await state.SavePublicAgentAsync(current with { ConnectionStatus = status }, ct);
+        if (current.ConnectionStatus != status || (status == "active" && current.SuspendedBy is not null))
+            await state.SavePublicAgentAsync(current with
+            {
+                ConnectionStatus = status,
+                SuspendedBy = status == "active" ? null : current.SuspendedBy,
+            }, ct);
     }
 
     private Task OnEntityUpdatedAsync(PluginEvent evt)

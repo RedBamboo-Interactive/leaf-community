@@ -31,6 +31,7 @@
   {"parentType":"leaf-commons-public-agent","slug":"scenario_toggles","name":"Scenario toggles","fieldType":"json","sortOrder":14},
   {"parentType":"leaf-commons-public-agent","slug":"shareable_folders","name":"Shareable folders","fieldType":"json","sortOrder":15},
   {"parentType":"leaf-commons-public-agent","slug":"restricted_mode","name":"Restricted mode","fieldType":"boolean","sortOrder":16,"defaultValue":"false","description":"Use the tool-free shareable-copy runner instead of the normal persistent Agent session"},
+  {"parentType":"leaf-commons-public-agent","slug":"suspended_by","name":"Suspended by","fieldType":"select","sortOrder":17,"constraints":"{\"options\":[\"owner\",\"host\",\"filter\",\"membership\"]}","description":"Relay suspension source; only an owner suspension can be lifted from this Leaf"},
   {"parentType":"leaf-commons-external-conversation","slug":"binding_id","name":"External binding ID","fieldType":"string","sortOrder":0},
   {"parentType":"leaf-commons-external-conversation","slug":"agent_entity_id","name":"Agent entity ID","fieldType":"string","sortOrder":1},
   {"parentType":"leaf-commons-external-conversation","slug":"thread_ref","name":"Relay conversation reference","fieldType":"string","sortOrder":2},

@@ -132,6 +132,39 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
             throw RelayError(response, json.RootElement, "envoy_suspend_failed");
     }
 
+    /// <summary>
+    /// Lifts the owner's own switch-off with exactly <c>{"suspended":false}</c>. Returns the Envoy's
+    /// status afterwards (<c>active</c>, or <c>pending</c> for a legacy pending Envoy). A host,
+    /// filter or membership suspension is refused with 403 <c>envoy_suspended</c>.
+    /// </summary>
+    public async Task<string?> ResumeAsync(CancellationToken ct = default)
+    {
+        using var response = await SendAsync(HttpMethod.Patch, "/v1/profile",
+            JsonContent.Create(new { suspended = false }), ct);
+        using var json = await ReadJsonAsync(response, ct);
+        if (!response.IsSuccessStatusCode)
+            throw RelayError(response, json.RootElement, "envoy_resume_failed");
+        return EnvoyStatus(json.RootElement);
+    }
+
+    /// <summary>
+    /// The Envoy's relay status from an empty profile patch, which changes nothing. A suspended
+    /// Envoy is refused with 403 <c>envoy_suspended</c>.
+    /// </summary>
+    public async Task<string?> ReadStatusAsync(CancellationToken ct = default)
+    {
+        using var response = await SendAsync(HttpMethod.Patch, "/v1/profile",
+            JsonContent.Create(new JsonObject()), ct);
+        using var json = await ReadJsonAsync(response, ct);
+        if (!response.IsSuccessStatusCode)
+            throw RelayError(response, json.RootElement, "profile_read_failed");
+        return EnvoyStatus(json.RootElement);
+    }
+
+    private static string? EnvoyStatus(JsonElement root)
+        => String(root.TryGetProperty("envoy", out var envoy) && envoy.ValueKind == JsonValueKind.Object
+            ? envoy : root, "status");
+
     public async Task<AvatarUploadResult> UploadAvatarAsync(byte[] bytes, string contentType, CancellationToken ct = default)
     {
         using var content = new ByteArrayContent(bytes);
@@ -365,7 +398,7 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
 public sealed record RelayListeningEvent(
     string Id, string Type, string Channel, string Content, string? Sender, string? ThreadRef,
     string? MessageId = null, string? AuthorDisplayName = null,
-    DateTimeOffset? Timestamp = null, string? Operation = null);
+    DateTimeOffset? Timestamp = null, string? Operation = null, string? SuspendedBy = null);
 
 public sealed class ConnectorCore(
     Func<EnvoyRunRequest, CancellationToken, Task> handler,
@@ -409,6 +442,8 @@ public sealed class ConnectorCore(
             var operation = frame.TryGetProperty("operation", out var operationNode)
                 && operationNode.ValueKind == JsonValueKind.String
                 ? operationNode.GetString() : null;
+            var suspendedBy = type == "owner_notice"
+                ? SuspensionSources.FromNotice(Text(frame, "suspendedBy"), Text(frame, "reason")) : null;
             var (images, omittedImages) = ParseImages(frame);
             var listeningOnly = type is "owner_notice" or "announcement" || (type == "event"
                 && (string.IsNullOrWhiteSpace(thread)
@@ -417,7 +452,7 @@ public sealed class ConnectorCore(
             {
                 if (listeningHandler is not null)
                     await listeningHandler(new(id, type!, channel, content, sender, thread,
-                        messageId, authorDisplayName, timestamp, operation), ct);
+                        messageId, authorDisplayName, timestamp, operation, suspendedBy), ct);
             }
             else
                 await handler(new(thread, kind, content, sender, id, Addressed: type == "ping",
@@ -471,41 +506,112 @@ public sealed class ConnectorCore(
             && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 }
 
+/// <summary>The relay refused the WebSocket handshake with HTTP 401 or 403 before upgrading.</summary>
+public sealed class RelayConnectRefusedException(int statusCode)
+    : Exception($"The relay refused the connection with HTTP {statusCode}")
+{
+    public int StatusCode { get; } = statusCode;
+}
+
+/// <param name="onRefused">Decides what a refused handshake means (suspended, pending, revoked):
+/// the delay before the next attempt, or null to stop the connector.</param>
 public sealed class RelayConnector(Func<CancellationToken, Task<(Uri BaseUri, string? Credential)>> settings, ConnectorCore core,
     Func<string, CancellationToken, Task> setStatus, ILogger<RelayConnector> logger,
-    Func<CancellationToken, Task>? onConnected = null) : IAsyncDisposable
+    Func<CancellationToken, Task>? onConnected = null,
+    Func<int, CancellationToken, Task<TimeSpan?>>? onRefused = null) : IAsyncDisposable
 {
+    private static readonly AsyncLocal<bool> InsideLoop = new();
     private readonly SemaphoreSlim single = new(1, 1);
     private CancellationTokenSource? running;
+    private Task? loop;
+
+    /// <summary>Completes when the loop has stopped (cancelled, or a refusal ended it).</summary>
+    public Task Completion => loop ?? Task.CompletedTask;
 
     public Task StartAsync(CancellationToken stopping)
     {
         if (running is not null) return Task.CompletedTask;
         running = CancellationTokenSource.CreateLinkedTokenSource(stopping);
-        _ = Task.Run(() => LoopAsync(running.Token), CancellationToken.None);
+        var token = running.Token;
+        loop = Task.Run(() => LoopAsync(token), CancellationToken.None);
         return Task.CompletedTask;
     }
 
     private async Task LoopAsync(CancellationToken ct)
     {
+        InsideLoop.Value = true;
         await single.WaitAsync(ct);
         try
         {
             var delay = TimeSpan.FromSeconds(1);
+            // One log line per failure state, not per retry: the same refusal or error repeats
+            // quietly until the connector connects or the failure changes.
+            string? failure = null;
             while (!ct.IsCancellationRequested)
             {
-                try { await ConnectOnceAsync(ct); delay = TimeSpan.FromSeconds(1); }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
-                catch (Exception error)
+                TimeSpan wait;
+                try
                 {
-                    logger.LogError(error, "Leaf Community connector iteration failed");
-                    await SetStatusAsync("reconnecting", ct);
-                    await Task.Delay(delay + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 500)), ct);
+                    await ConnectOnceAsync(ct);
+                    delay = TimeSpan.FromSeconds(1);
+                    if (failure is not null) logger.LogInformation("Leaf Community connector recovered");
+                    failure = null;
+                    continue;
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
+                catch (RelayConnectRefusedException refused)
+                {
+                    var key = $"refused:{refused.StatusCode}";
+                    if (failure != key)
+                        logger.LogWarning("Leaf Community relay refused the connection (HTTP {Status})", refused.StatusCode);
+                    failure = key;
+                    var next = onRefused is null ? delay : await RefusedSafelyAsync(refused.StatusCode, ct);
+                    if (next is null)
+                    {
+                        logger.LogWarning("Leaf Community connector stopped: the relay refuses this Agent");
+                        break;
+                    }
+                    if (onRefused is null) await TrySetStatusAsync("reconnecting", ct);
+                    wait = next.Value;
                     delay = TimeSpan.FromSeconds(Math.Min(30, delay.TotalSeconds * 2));
                 }
+                catch (Exception error)
+                {
+                    var key = $"{error.GetType().FullName}:{error.Message}";
+                    if (failure != key) logger.LogError(error, "Leaf Community connector iteration failed");
+                    else logger.LogDebug("Leaf Community connector iteration failed again ({Type})", error.GetType().Name);
+                    failure = key;
+                    await TrySetStatusAsync("reconnecting", ct);
+                    wait = delay;
+                    delay = TimeSpan.FromSeconds(Math.Min(30, delay.TotalSeconds * 2));
+                }
+                try { await Task.Delay(wait + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 500)), ct); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             }
         }
         finally { single.Release(); }
+    }
+
+    private async Task<TimeSpan?> RefusedSafelyAsync(int statusCode, CancellationToken ct)
+    {
+        try { return await onRefused!(statusCode, ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception error)
+        {
+            logger.LogWarning("Leaf Community refusal handling failed ({Type}: {Message})", error.GetType().Name, error.Message);
+            return TimeSpan.FromSeconds(30);
+        }
+    }
+
+    /// <summary>A failed status save must never end the retry loop.</summary>
+    private async Task TrySetStatusAsync(string status, CancellationToken ct)
+    {
+        try { await SetStatusAsync(status, ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            logger.LogWarning("Leaf Community connector status '{Status}' could not be saved ({Type})", status, error.GetType().Name);
+        }
     }
 
     private async Task ConnectOnceAsync(CancellationToken ct)
@@ -514,7 +620,12 @@ public sealed class RelayConnector(Func<CancellationToken, Task<(Uri BaseUri, st
         if (string.IsNullOrWhiteSpace(credential)) { await SetStatusAsync("disconnected", ct); await Task.Delay(TimeSpan.FromSeconds(5), ct); return; }
         var uri = new UriBuilder(baseUri) { Scheme = baseUri.Scheme == "https" ? "wss" : "ws", Path = "/v1/connect", Query = "" }.Uri;
         using var ws = new ClientWebSocket(); ws.Options.SetRequestHeader("Authorization", "Bearer " + credential);
-        await ws.ConnectAsync(uri, ct);
+        ws.Options.CollectHttpResponseDetails = true;
+        try { await ws.ConnectAsync(uri, ct); }
+        catch (WebSocketException) when (ws.HttpStatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
+        {
+            throw new RelayConnectRefusedException((int)ws.HttpStatusCode);
+        }
         if (onConnected is not null) await onConnected(ct);
         await SetStatusAsync("active", ct);
         var buffer = new byte[64 * 1024];
@@ -531,5 +642,18 @@ public sealed class RelayConnector(Func<CancellationToken, Task<(Uri BaseUri, st
     private static Task SendAsync(ClientWebSocket ws, string json, CancellationToken ct) => ws.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, ct);
     private async Task SetStatusAsync(string status, CancellationToken ct)
         => await setStatus(status, ct);
-    public async ValueTask DisposeAsync() { if (running is null) return; await running.CancelAsync(); running.Dispose(); running = null; single.Dispose(); }
+
+    /// <summary>
+    /// Cancels the loop and waits for it to stop, unless called from inside the loop (a refusal
+    /// handler stopping its own connector), where waiting would deadlock.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        if (running is not { } cts) return;
+        running = null;
+        await cts.CancelAsync();
+        if (loop is { } task && !InsideLoop.Value)
+            try { await task; } catch (OperationCanceledException) { }
+        cts.Dispose();
+    }
 }

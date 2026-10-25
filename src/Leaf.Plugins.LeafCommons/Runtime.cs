@@ -155,6 +155,11 @@ public sealed class PublicAgentRuntime(
         var agent = configuration.Agents.FirstOrDefault(item => item.Enabled && string.Equals(
             item.AgentEntityId, agentEntityId, StringComparison.OrdinalIgnoreCase));
         if (agent is null) return;
+        // A host, filter or membership suspension notice says who suspended the Envoy; the relay's
+        // later refusals do not, so the source is kept for the owner's settings row.
+        if (listening.SuspendedBy is SuspensionSources.Host or SuspensionSources.Filter or SuspensionSources.Membership
+            && agent.SuspendedBy != listening.SuspendedBy)
+            agent = await state.SavePublicAgentAsync(agent with { SuspendedBy = listening.SuspendedBy }, ct);
         var decision = filter.Check(listening.Content, configuration.Owner.PersonalWords,
             configuration.Owner.Canaries);
         if (!decision.Allowed)
