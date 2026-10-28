@@ -51,6 +51,91 @@ public sealed partial class ExternalConversationTests : IDisposable
     }
 
     [Fact]
+    public async Task Public_session_runs_on_the_Agents_own_provider_and_tier()
+    {
+        var fixture = await CreateAsync();
+        SeedAgentCompute(fixture.Entities, "anthropic-direct", "deep");
+        fixture.Entities.Seed(Guid.NewGuid(), "quality-mode", "Deep Claude (custom)", "deep-claude-custom",
+            new JsonObject { ["provider"] = "anthropic-direct", ["quality_tier"] = "deep", ["model"] = "custom" });
+
+        await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-1", "Hello"));
+
+        var opened = Assert.Single(fixture.Provider.Opens);
+        Assert.Equal("deep-claude", opened.SessionCompute!.ModeId);
+        Assert.Equal("anthropic-direct", opened.SessionCompute.Provider);
+        Assert.Equal("claude-model", opened.SessionCompute.Model);
+        Assert.Equal("deep-claude", fixture.Provider.Inputs.Single().Metadata!["session_quality_mode"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Agent_without_a_provider_keeps_the_fallback_mode()
+    {
+        var resolver = new CommonsRuntimeOptionsResolver(QualityModes(new MemoryEntityStore()));
+
+        var mode = await resolver.ResolveForAgentAsync(Guid.NewGuid().ToString());
+
+        Assert.Equal(CommonsRuntimeOptionsResolver.FallbackQualityMode, mode.Id);
+    }
+
+    [Fact]
+    public async Task Agent_on_a_provider_without_a_matching_mode_fails_instead_of_borrowing_another()
+    {
+        var entities = QualityModes(new MemoryEntityStore());
+        var agentId = Guid.NewGuid();
+        entities.Seed(agentId, "agent", "Agent", "agent-x",
+            new JsonObject { ["provider"] = "ollama-local", ["quality_tier"] = "deep" });
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new CommonsRuntimeOptionsResolver(entities).ResolveForAgentAsync(agentId.ToString()));
+
+        Assert.Contains("ollama-local", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Session_opened_on_another_mode_moves_the_thread_to_a_new_generation()
+    {
+        var fixture = await CreateAsync();
+        await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-1", "On the old mode"));
+        Assert.Equal("deep-codex", (await new CommonsExternalConversationStore(fixture.Entities)
+            .FindAsync(AgentId, "message:root"))!.QualityMode);
+
+        SeedAgentCompute(fixture.Entities, "anthropic-direct", "deep");
+        await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-2", "Now on the Agent's mode"));
+        await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-3", "Still on it"));
+
+        Assert.Equal([1L, 2L], fixture.Provider.Opens.Select(open => open.Generation).ToArray());
+        Assert.Equal("deep-claude", fixture.Provider.Opens[1].SessionCompute!.ModeId);
+        var record = await new CommonsExternalConversationStore(fixture.Entities).FindAsync(AgentId, "message:root");
+        Assert.Equal(2, record!.Generation);
+        Assert.Equal("session-2", record.SessionId);
+        Assert.Equal("deep-claude", record.QualityMode);
+    }
+
+    private static void SeedAgentCompute(MemoryEntityStore entities, string provider, string tier)
+    {
+        var providerId = Guid.NewGuid();
+        var tierId = Guid.NewGuid();
+        entities.Seed(providerId, "provider", provider, provider, []);
+        entities.Seed(tierId, "quality-tier", tier, tier, []);
+        entities.Seed(Guid.Parse(AgentId), "agent", "Nova", "nova", new JsonObject
+        {
+            ["provider"] = providerId.ToString(),
+            ["quality_tier"] = tierId.ToString(),
+        });
+        entities.Seed(Guid.NewGuid(), "quality-mode", "Deep Claude", "deep-claude", new JsonObject
+        {
+            ["provider"] = provider, ["quality_tier"] = tier, ["model"] = "claude-model", ["is_default"] = true,
+        });
+    }
+
+    private static MemoryEntityStore QualityModes(MemoryEntityStore entities)
+    {
+        entities.Seed(Guid.NewGuid(), "quality-mode", "Deep Codex", "deep-codex",
+            new JsonObject { ["provider"] = "codex-default", ["quality_tier"] = "deep" });
+        return entities;
+    }
+
+    [Fact]
     public async Task Clear_advances_generation_and_opens_a_fresh_persistent_session()
     {
         var fixture = await CreateAsync();

@@ -33,6 +33,10 @@ public sealed record CommonsExternalConversation(
     public string? ReviewWaitUid { get; init; }
     public int ReviewAttempts { get; init; }
     public DateTimeOffset? ReviewNextAt { get; init; }
+
+    /// <summary>The quality mode the session was opened with. Sessions from before this was
+    /// recorded were all opened on <see cref="CommonsRuntimeOptionsResolver.FallbackQualityMode"/>.</summary>
+    public string? QualityMode { get; init; }
 }
 
 public sealed class CommonsExternalConversationStore(IEntityStore entities)
@@ -84,6 +88,7 @@ public sealed class CommonsExternalConversationStore(IEntityStore entities)
             ["review_wait_uid"] = value.ReviewWaitUid,
             ["review_attempts"] = (long)value.ReviewAttempts,
             ["review_next_at"] = value.ReviewNextAt?.ToString("O"),
+            ["quality_mode"] = value.QualityMode,
             ["updated_at"] = now.ToString("O"),
         };
         var saved = await entities.UpsertBySlugAsync(TypeSlug,
@@ -120,6 +125,7 @@ public sealed class CommonsExternalConversationStore(IEntityStore entities)
             ReviewWaitUid = Text(data, "review_wait_uid"),
             ReviewAttempts = (int)Number(data, "review_attempts", 0),
             ReviewNextAt = DateTimeOffset.TryParse(Text(data, "review_next_at"), out var nextAt) ? nextAt : null,
+            QualityMode = Text(data, "quality_mode"),
         };
     }
 
@@ -137,18 +143,65 @@ public sealed record CommonsQualityMode(
 
 public sealed class CommonsRuntimeOptionsResolver(IEntityStore entities)
 {
+    /// <summary>Used only for an Agent that names no provider or quality tier of its own.</summary>
+    public const string FallbackQualityMode = "deep-codex";
+
     public async Task<CommonsQualityMode> ResolveAsync(
-        string reference = "deep-codex", CancellationToken ct = default)
+        string reference = FallbackQualityMode, CancellationToken ct = default)
+    {
+        var entity = await FindAsync("quality-mode", reference, ct);
+        if (entity is null)
+            throw new InvalidOperationException($"Leaf Community quality mode '{reference}' was not found");
+        return Map(entity);
+    }
+
+    /// <summary>
+    /// The public session runs on the Agent's own provider and quality tier, the same choice
+    /// its owner made in RedLeaf. A fixed mode would send every owner to one provider, which
+    /// silently produces nothing for an owner who has no subscription to it.
+    /// </summary>
+    public async Task<CommonsQualityMode> ResolveForAgentAsync(
+        string agentEntityId, CancellationToken ct = default)
+    {
+        var agent = await FindAsync("agent", agentEntityId, ct);
+        var provider = await SlugAsync("provider", agent is null ? null : Text(agent.Data, "provider"), ct);
+        var tier = await SlugAsync("quality-tier", agent is null ? null : Text(agent.Data, "quality_tier"), ct);
+        if (provider is null || tier is null) return await ResolveAsync(FallbackQualityMode, ct);
+
+        var mode = (await entities.QueryAsync(new EntityQuery { TypeSlug = "quality-mode" }, ct))
+            .Where(entity => string.Equals(Text(entity.Data, "provider"), provider, StringComparison.Ordinal)
+                && string.Equals(Text(entity.Data, "quality_tier"), tier, StringComparison.Ordinal))
+            .OrderByDescending(entity => entity.Data["is_default"] is JsonValue value
+                && value.TryGetValue<bool>(out var isDefault) && isDefault)
+            .ThenBy(entity => entity.Slug, StringComparer.Ordinal)
+            .FirstOrDefault()
+            ?? throw new InvalidOperationException(
+                $"No quality mode serves Agent '{agentEntityId}' on provider '{provider}' at tier '{tier}'");
+        return Map(mode);
+    }
+
+    private async Task<LeafEntity?> FindAsync(string typeSlug, string reference, CancellationToken ct)
     {
         var entity = Guid.TryParse(reference, out var id)
             ? await entities.GetAsync(id, ct)
-            : await entities.GetBySlugAsync("quality-mode", reference, ct);
-        if (entity is not { TypeSlug: "quality-mode" })
-            throw new InvalidOperationException($"Leaf Community quality mode '{reference}' was not found");
+            : await entities.GetBySlugAsync(typeSlug, reference, ct);
+        return entity?.TypeSlug == typeSlug ? entity : null;
+    }
+
+    /// <summary>Agents store a provider or tier as an entity ID or a slug; modes store the slug.</summary>
+    private async Task<string?> SlugAsync(string typeSlug, string? reference, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(reference)) return null;
+        if (!Guid.TryParse(reference, out _)) return reference.Trim();
+        return (await FindAsync(typeSlug, reference, ct))?.Slug;
+    }
+
+    private static CommonsQualityMode Map(LeafEntity entity)
+    {
         var provider = Text(entity.Data, "provider");
         var tier = Text(entity.Data, "quality_tier");
         if (string.IsNullOrWhiteSpace(provider) || string.IsNullOrWhiteSpace(tier))
-            throw new InvalidOperationException($"Leaf Community quality mode '{reference}' is incomplete");
+            throw new InvalidOperationException($"Leaf Community quality mode '{entity.Slug}' is incomplete");
         return new(entity.Slug, provider, tier,
             Text(entity.Data, "model"), Text(entity.Data, "effort"));
     }
@@ -172,7 +225,6 @@ public sealed class PublicAgentConversationCoordinator(
     CommonsInboundImages? inboundImages = null,
     IAssets? assets = null) : IDisposable
 {
-    private const string QualityMode = "deep-codex";
     private const int MaximumSettledText = 32_000;
     /// <summary>Unavailable outbound reviews are asked this many times before the reply is withheld.</summary>
     internal const int MaxOutboundReviewAttempts = 4;
@@ -265,12 +317,20 @@ public sealed class PublicAgentConversationCoordinator(
                 ReplyScenario = ReplyScenario(request.Kind),
                 Channel = request.Channel,
             };
-            var handle = await EnsureConversationAsync(provider, record, owner, ct);
+            var quality = await runtimeOptions.ResolveForAgentAsync(agent.AgentEntityId, ct);
+            // A session runs on the compute it was opened with. When the Agent's mode no longer
+            // matches, the thread moves to a new generation on the right one.
+            if (!string.IsNullOrWhiteSpace(record.SessionId) && !string.Equals(
+                    record.QualityMode ?? CommonsRuntimeOptionsResolver.FallbackQualityMode,
+                    quality.Id, StringComparison.Ordinal))
+                record = NextGeneration(record);
+            var handle = await EnsureConversationAsync(provider, record, owner, quality, ct);
             record = await conversations.SaveAsync(record with
             {
                 ProviderId = handle.ProviderId,
                 ConversationId = handle.ConversationId,
                 SessionId = handle.SessionId,
+                QualityMode = quality.Id,
             }, ct);
             var requestor = Requestor(request.SenderProvenance);
             var requestId = request.TriggerId ?? Guid.NewGuid().ToString("N");
@@ -283,7 +343,6 @@ public sealed class PublicAgentConversationCoordinator(
                     ? new CommonsInboundImageSet([], (request.Images?.Count ?? 0) + request.OmittedImages)
                     : await inboundImages.ResolveAsync(agent.AgentEntityId, requestId,
                         request.Images ?? [], request.OmittedImages, ct);
-            var quality = await runtimeOptions.ResolveAsync(QualityMode, ct);
             var metadata = new JsonObject
             {
                 ["transport"] = "leaf-commons",
@@ -353,22 +412,16 @@ public sealed class PublicAgentConversationCoordinator(
         await gate.WaitAsync(ct);
         try
         {
-            var next = current with
-            {
-                Generation = checked(current.Generation + 1),
-                ProviderId = null,
-                ConversationId = null,
-                SessionId = null,
-                CursorEpoch = null,
-                CursorSequence = 0,
-            };
+            var next = NextGeneration(current);
             var provider = ResolveProvider(agentEntityId);
-            var handle = await EnsureConversationAsync(provider, next, configuration.Owner, ct);
+            var quality = await runtimeOptions.ResolveForAgentAsync(agentEntityId, ct);
+            var handle = await EnsureConversationAsync(provider, next, configuration.Owner, quality, ct);
             next = await conversations.SaveAsync(next with
             {
                 ProviderId = handle.ProviderId,
                 ConversationId = handle.ConversationId,
                 SessionId = handle.SessionId,
+                QualityMode = quality.Id,
             }, ct);
             await audit.RecordAsync("external_conversation_cleared", Metadata(agentEntityId,
                 ("thread", threadRef), ("binding_id", next.BindingId),
@@ -378,10 +431,22 @@ public sealed class PublicAgentConversationCoordinator(
         finally { gate.Release(); }
     }
 
+    private static CommonsExternalConversation NextGeneration(CommonsExternalConversation current)
+        => current with
+        {
+            Generation = checked(current.Generation + 1),
+            ProviderId = null,
+            ConversationId = null,
+            SessionId = null,
+            CursorEpoch = null,
+            CursorSequence = 0,
+        };
+
     private async Task<ExternalConversationHandle> EnsureConversationAsync(
         IExternalAgentConversationProvider provider,
         CommonsExternalConversation record,
         CommonsOwnerSettings owner,
+        CommonsQualityMode quality,
         CancellationToken ct)
     {
         if (!string.IsNullOrWhiteSpace(record.ProviderId)
@@ -390,7 +455,6 @@ public sealed class PublicAgentConversationCoordinator(
             return new(record.ProviderId, record.BindingId, record.Generation,
                 record.ConversationId, record.SessionId);
 
-        var quality = await runtimeOptions.ResolveAsync(QualityMode, ct);
         var selection = new ExternalConversationComputeSelection(
             quality.Id, quality.Provider, quality.QualityTier, quality.Model, quality.Effort);
         return await provider.OpenAsync(new ExternalConversationOpenRequest(
