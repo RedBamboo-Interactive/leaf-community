@@ -266,6 +266,13 @@ public sealed partial class ExternalConversationTests : IDisposable
         Assert.Equal(UntrustedContentDirection.Outbound, request.Direction);
         Assert.Null(request.Compute);
         Assert.Equal(UntrustedContentSources.LeafCommons, request.Origin.Source);
+        // The settled-turn review has no request scope to inherit, so it carries its own
+        // provenance; without it RedLeaf refuses the Compute call (Fred's install, 2026-10-28).
+        var provenance = Assert.IsType<ComputeProvenance>(request.ComputeProvenance);
+        Assert.Equal(LeafCommonsPlugin.PluginId, provenance.Origin.App.Id);
+        Assert.Equal("agent", provenance.Actor.Kind);
+        Assert.Equal("system", provenance.OnBehalfOf.Kind);
+        Assert.Contains(provenance.Context, item => item.Kind == "external-conversation");
         Assert.Contains(await fixture.State.ListDigestsAsync(), digest => digest.Type == "owner_notice");
 
         fixture.Sentinel.Decide = _ => TestSentinel.Clean;
@@ -545,7 +552,7 @@ public sealed partial class ExternalConversationTests : IDisposable
             new RelayClientFactory(new FixedHttpClientFactory(liveRelay ?? relay), state),
             new OutboundFilter(new SecretScanner()), digest, state, [provider],
             NullLogger<PublicAgentConversationCoordinator>.Instance,
-            noSentinel ? CommonsOutboundReview.Unavailable : new CommonsOutboundReview(sentinel),
+            noSentinel ? CommonsOutboundReview.Unavailable : new CommonsOutboundReview(sentinel, entities: entities),
             cdn is null || assets is null ? null : new CommonsInboundImages(new HttpClient(cdn), assets, state),
             assets)
         {
@@ -566,6 +573,20 @@ public sealed partial class ExternalConversationTests : IDisposable
             new ExternalConversationCursor("epoch-1", sequence), $"message-{sequence}",
             role, kind, content, DateTimeOffset.UtcNow,
             new JsonObject { ["phase"] = kind == "text" ? "final" : "commentary" });
+
+    [Fact]
+    public async Task Outbound_review_provenance_names_the_owner_when_they_resolve_to_a_user()
+    {
+        var entities = new MemoryEntityStore();
+        var userId = Guid.NewGuid();
+        entities.Seed(userId, "user", "Fred", "fred", new JsonObject());
+
+        var owner = await CommonsComputeProvenance.BeneficiaryAsync(entities, userId.ToString(), default);
+        var missing = await CommonsComputeProvenance.BeneficiaryAsync(entities, Guid.NewGuid().ToString(), default);
+
+        Assert.Equal(("user", userId.ToString()), (owner.Kind, owner.Id));
+        Assert.Equal("system", missing.Kind);
+    }
 
     private sealed record Fixture(
         MemoryEntityStore Entities,

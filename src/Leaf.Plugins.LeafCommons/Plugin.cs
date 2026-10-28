@@ -43,7 +43,8 @@ public sealed class LeafCommonsPlugin : ILeafPlugin
         // nothing model-written leaves (fail closed), but Leaf Commons still runs.
         services.AddSingleton(sp => new CommonsOutboundReview(
             sp.GetService<IUntrustedContentReview>(),
-            sp.GetService<Microsoft.Extensions.Logging.ILogger<CommonsOutboundReview>>()));
+            sp.GetService<Microsoft.Extensions.Logging.ILogger<CommonsOutboundReview>>(),
+            sp.GetService<IEntityStore>()));
         services.AddHttpClient(CommonsInboundImages.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(30))
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
         services.AddSingleton(sp => new CommonsInboundImages(

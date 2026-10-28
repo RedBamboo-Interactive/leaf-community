@@ -649,7 +649,8 @@ public sealed class PublicAgentConversationCoordinator(
         // Text and images are one review, with Leaf Discord's rule: hold on high risk or
         // require_private_approval; fail closed when unavailable or when not every image was seen.
         var verdict = await review.ReviewAsync(agent.AgentEntityId, record.ThreadRef, content,
-            $"commons-settled:{record.BindingId}:{record.Generation}:{message.MessageUid}", ct, images);
+            $"commons-settled:{record.BindingId}:{record.Generation}:{message.MessageUid}", ct, images,
+            configuration.Owner.OwnerUserId);
         var reviewed = new JsonObject
         {
             ["message_uid"] = message.MessageUid,

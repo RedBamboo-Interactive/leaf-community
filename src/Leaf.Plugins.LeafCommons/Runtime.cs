@@ -210,7 +210,7 @@ public sealed class PublicAgentRuntime(
         // reads as a rejected post, which the runner answers with its fixed fallback.
         var runner = new EnvoyRunner(model, shareables.For(agentEntityId),
             new ReviewedEnvoyRelay(relays.For(agentEntityId), review, agentEntityId, audit,
-                request.ReplyToDisplayName),
+                request.ReplyToDisplayName, configuration.Owner.OwnerUserId),
             filter, audit, configuration.Owner.PersonalWords, configuration.Owner.Canaries,
             speakerName: agent.DisplayPersona(configuration.Owner.PublicName));
         var result = await runner.RunAsync(request, ct);
@@ -279,7 +279,7 @@ public sealed class PublicAgentRuntime(
 
         var verdict = await review.ReviewAsync(agent.AgentEntityId, scenario,
             $"{brief.Title}\n\n{brief.Content}" + (addresses.Length > 0 ? $"\n\n[addresses] {string.Join(", ", addresses)}" : ""),
-            $"commons-brief:{dispatchId:N}", ct);
+            $"commons-brief:{dispatchId:N}", ct, ownerUserId: configuration.Owner.OwnerUserId);
         await state.RecordAsync("outbound_review", Metadata(agent.AgentEntityId,
             ("dispatchId", dispatchId), ("outcome", verdict.Review["outcome"]?.GetValue<string>()),
             ("available", !verdict.Unavailable)), ct);

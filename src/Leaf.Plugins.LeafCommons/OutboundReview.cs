@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json.Nodes;
+using Leaf.Sdk;
 using Leaf.Sdk.Services;
 using Microsoft.Extensions.Logging;
 
@@ -20,7 +21,8 @@ public sealed record CommonsOutboundVerdict(bool Allowed, bool Unavailable, Json
 /// </summary>
 public sealed class CommonsOutboundReview(
     IUntrustedContentReview? sentinel = null,
-    ILogger<CommonsOutboundReview>? logger = null)
+    ILogger<CommonsOutboundReview>? logger = null,
+    IEntityStore? entities = null)
 {
     public const string Audience =
         "a public Discord channel or thread in a Leaf Community server, readable by every member who can see it";
@@ -32,10 +34,12 @@ public sealed class CommonsOutboundReview(
     /// Discord does): the Sentinel reads the Asset bytes and reviews them on a vision model with the
     /// same rubric. A verdict counts only when it echoes the outbound direction and reviewed every
     /// image sent; a reviewer that ignored the images, or could not see them, is unavailable.
+    /// The review states its own provenance for <paramref name="ownerUserId"/>, so it runs with a
+    /// signed execution identity even when no request or execution scope is there to inherit.
     /// </summary>
     public async Task<CommonsOutboundVerdict> ReviewAsync(
         string agentEntityId, string threadRef, string content, string key, CancellationToken ct = default,
-        IReadOnlyList<ExternalConversationOutputAsset>? images = null)
+        IReadOnlyList<ExternalConversationOutputAsset>? images = null, string? ownerUserId = null)
     {
         images ??= [];
         var watch = Stopwatch.StartNew();
@@ -46,15 +50,21 @@ public sealed class CommonsOutboundReview(
             {
                 // No compute: the Sentinel always runs on its configured tier (fast by default) on
                 // the installation's default provider.
+                var reviewKey = key.Length <= 200 ? key : key[..200];
+                var provenance = await CommonsComputeProvenance.CreateAsync(entities, agentEntityId, ownerUserId,
+                    [new ComputeContextReference("external-conversation", threadRef),
+                     new ComputeContextReference("outbound-review", reviewKey)],
+                    reviewKey, ct);
                 result = await sentinel.ReviewAsync(new UntrustedContentReviewRequest
                 {
                     Content = content,
                     Origin = new UntrustedContentOrigin(
                         UntrustedContentSources.LeafCommons, threadRef, null, LeafCommonsPlugin.PluginId),
                     AgentRef = agentEntityId,
+                    ComputeProvenance = provenance,
                     Direction = UntrustedContentDirection.Outbound,
                     Audience = Audience,
-                    IdempotencyKey = key.Length <= 200 ? key : key[..200],
+                    IdempotencyKey = reviewKey,
                     JobName = "Leaf Community outbound review",
                     Images = images.Count == 0 ? null : images.Select(CommonsImages.ReviewImage).ToArray(),
                 }, ct);
@@ -121,7 +131,7 @@ public sealed class CommonsOutboundReview(
 /// </summary>
 public sealed class ReviewedEnvoyRelay(
     IEnvoyRelay inner, CommonsOutboundReview review, string agentEntityId, ICommonsAudit audit,
-    string? replyToDisplayName = null) : IEnvoyRelay
+    string? replyToDisplayName = null, string? ownerUserId = null) : IEnvoyRelay
 {
     public Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default)
         => inner.ReadHistoryAsync(threadRef, ct);
@@ -149,7 +159,7 @@ public sealed class ReviewedEnvoyRelay(
             return null;
         var text = addresses is { Count: > 0 } ? $"{content}\n\n[addresses] {string.Join(", ", addresses)}" : content;
         var verdict = await review.ReviewAsync(agentEntityId, threadRef, text,
-            $"commons-envoy:{agentEntityId}:{idempotencyKey ?? threadRef}", ct);
+            $"commons-envoy:{agentEntityId}:{idempotencyKey ?? threadRef}", ct, ownerUserId: ownerUserId);
         await audit.RecordAsync("outbound_review", new Dictionary<string, object?>
         {
             ["thread"] = threadRef,
