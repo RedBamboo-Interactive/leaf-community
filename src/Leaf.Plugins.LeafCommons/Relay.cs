@@ -31,7 +31,10 @@ public sealed class RelayApiException(string reason, string message, int statusC
 public sealed class RelayFeatureUnavailableException(string feature)
     : Exception($"Relay feature '{feature}' is unavailable");
 
-public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Task<(Uri BaseUri, string? Credential)>> settings) : IEnvoyRelay, IAvatarUploader
+public sealed class RelayHttpClient(
+    HttpClient http,
+    Func<CancellationToken, Task<(Uri BaseUri, string? Credential)>> settings,
+    Func<TimeSpan, CancellationToken, Task>? delay = null) : IEnvoyRelay, IAvatarUploader
 {
     public Task<RelayProfile> ReadProfileAsync(CancellationToken ct = default)
         => PatchProfileAsync(null, null, null, ct);
@@ -329,10 +332,27 @@ public sealed class RelayHttpClient(HttpClient http, Func<CancellationToken, Tas
             using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
             var root = json.RootElement; var decision = root.TryGetProperty("decision", out var d) ? d.GetString() : null;
             var result = Result(root, decision);
-            if ((int)response.StatusCode != 409 || result.Code != "idempotency_in_progress" || attempt >= 3) return result;
-            await Task.Delay(TimeSpan.FromMilliseconds(100 * (1 << attempt)), ct);
+            if ((int)response.StatusCode == 409 && result.Code == "idempotency_in_progress" && attempt < 3)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(100 * (1 << attempt)), ct);
+                continue;
+            }
+            // The relay asks the host to install a webhook on a channel's first post and records
+            // nothing for the idempotency key, so the same body is retried once the host has it.
+            if ((int)response.StatusCode == 503 && result.Code == "webhook_pending" && attempt < WebhookPendingAttempts)
+            {
+                await (delay ?? Task.Delay)(WebhookPendingDelay(root), ct);
+                continue;
+            }
+            return result;
         }
     }
+
+    private const int WebhookPendingAttempts = 6;
+
+    private static TimeSpan WebhookPendingDelay(JsonElement root)
+        => TimeSpan.FromSeconds(root.TryGetProperty("retryAfterSeconds", out var retry)
+            && retry.TryGetInt32(out var seconds) ? Math.Clamp(seconds, 1, 5) : 2);
 
     private static RelayPostResult Result(JsonElement root, string? decision) => new(decision == "posted",
         root.TryGetProperty("reason", out var reason) ? reason.GetString() : null,
