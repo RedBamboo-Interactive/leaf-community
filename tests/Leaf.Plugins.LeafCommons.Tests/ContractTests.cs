@@ -72,7 +72,7 @@ public sealed class ContractTests
     [Fact]
     public void Owner_guard_requires_matching_private_nova_agent_and_beneficiary()
     {
-        var settings = new CommonsSettings(null, "http://127.0.0.1", null, "pending", "Nova", null, new Dictionary<string, bool>(), [], [], [], null, [], "owner-1", "agent-1");
+        var settings = new CommonsSettings(null, "http://127.0.0.1", null, "pending", "Nova", null, ConversationSwitches.Default, [], [], [], null, [], "owner-1", "agent-1");
         var identity = """{"app":{"id":"nova"},"actor":{"kind":"agent","entityId":"agent-1"},"beneficiary":{"kind":"user","id":"owner-1"},"context":[{"kind":"discussion","id":"d1"}]}""";
         var principal = Principal(identity);
         Assert.NotNull(OwnerGuard.ReadPrivateNovaAgent(principal, settings));
@@ -85,7 +85,7 @@ public sealed class ContractTests
     [Fact]
     public void Public_settings_projection_never_returns_the_envoy_credential()
     {
-        var settings = new CommonsSettings(null, "https://relay.example", "envoy.secret-value", "active", "Nova", null, new Dictionary<string, bool>(), [], [], [], null, []);
+        var settings = new CommonsSettings(null, "https://relay.example", "envoy.secret-value", "active", "Nova", null, ConversationSwitches.Default, [], [], [], null, []);
         var json = JsonSerializer.Serialize(settings.Public());
         Assert.DoesNotContain("secret-value", json); Assert.Contains("credentialConfigured", json);
     }
@@ -132,7 +132,7 @@ public sealed class ContractTests
     }
 
     [Fact]
-    public async Task Text_channel_ping_preserves_message_chain_scenario_channel_and_reply_name()
+    public async Task Text_channel_ping_keeps_its_message_chain_channel_and_reply_name_without_reading_a_scenario()
     {
         var runs = new List<EnvoyRunRequest>();
         var core = new ConnectorCore((request, _) => { runs.Add(request); return Task.CompletedTask; });
@@ -147,25 +147,42 @@ public sealed class ContractTests
 
         var run = Assert.Single(runs);
         Assert.True(run.Addressed);
-        Assert.Equal("channel_reply", run.Kind);
+        Assert.Equal("ping", run.Kind);
         Assert.Equal("showcase", run.Channel);
         Assert.Equal("message:1563000000000000000", run.ThreadRef);
         Assert.Equal("Laurent", run.ReplyToDisplayName);
     }
 
     [Fact]
-    public async Task Relay_channel_reply_request_uses_the_message_chain_and_channel_scenario()
+    public async Task Relay_reply_names_only_its_thread_and_leaves_the_replying_line_to_the_relay()
     {
         var handler = new CaptureHttpHandler();
         var relay = new RelayHttpClient(new HttpClient(handler), _ =>
             Task.FromResult<(Uri, string?)>((new Uri("https://relay.example"), "envoy.secret")));
 
-        await relay.ReplyAsync("message:root-1", "channel_reply", "Replying to Laurent: 4.");
+        await relay.PostAsync("message:root-1", "4.", idempotencyKey: "key-1");
 
         using var body = JsonDocument.Parse(handler.Body!);
-        Assert.Equal("channel_reply", body.RootElement.GetProperty("scenario").GetString());
+        Assert.Equal(["addresses", "content", "idempotencyKey", "threadRef"],
+            body.RootElement.EnumerateObject().Select(x => x.Name).Order().ToArray());
         Assert.Equal("message:root-1", body.RootElement.GetProperty("threadRef").GetString());
-        Assert.Equal("Replying to Laurent: 4.", body.RootElement.GetProperty("content").GetString());
+        Assert.Equal("4.", body.RootElement.GetProperty("content").GetString());
+    }
+
+    [Fact]
+    public async Task Relay_open_names_a_channel_and_a_title()
+    {
+        var handler = new CaptureHttpHandler();
+        var relay = new RelayHttpClient(new HttpClient(handler), _ =>
+            Task.FromResult<(Uri, string?)>((new Uri("https://relay.example"), "envoy.secret")));
+
+        await relay.OpenAsync("200", "Retry strategy", "How do you retry?", ["Nova"], "key-2");
+
+        using var body = JsonDocument.Parse(handler.Body!);
+        Assert.Equal(["addresses", "channelId", "content", "idempotencyKey", "title"],
+            body.RootElement.EnumerateObject().Select(x => x.Name).Order().ToArray());
+        Assert.Equal("200", body.RootElement.GetProperty("channelId").GetString());
+        Assert.Equal("Retry strategy", body.RootElement.GetProperty("title").GetString());
     }
 
     [Fact]
@@ -173,9 +190,9 @@ public sealed class ContractTests
     {
         var handler = new CaptureHttpHandler();
         var relay = new RelayHttpClient(new HttpClient(handler), _ => Task.FromResult<(Uri, string?)>((new Uri("https://relay.example"), "envoy.secret")));
-        await relay.UpdateProfileAsync("Owner", new Dictionary<string, bool> { ["consult"] = true });
+        await relay.UpdateProfileAsync("Owner");
         using var body = JsonDocument.Parse(handler.Body!);
-        Assert.Equal(["publicName", "scenarioToggles"], body.RootElement.EnumerateObject().Select(x => x.Name).Order().ToArray());
+        Assert.Equal(["publicName"], body.RootElement.EnumerateObject().Select(x => x.Name).Order().ToArray());
         Assert.Equal("Owner", body.RootElement.GetProperty("publicName").GetString());
         Assert.False(body.RootElement.TryGetProperty("avatarObjectKey", out _));
         Assert.Equal("Bearer", handler.AuthorizationScheme); Assert.Equal("envoy.secret", handler.AuthorizationParameter);
@@ -211,7 +228,7 @@ public sealed class ContractTests
             Task.FromResult<(Uri, string?)>((new Uri("https://relay.example"), "envoy.secret")));
 
         var error = await Assert.ThrowsAsync<RelayApiException>(() =>
-            relay.UpdateProfileAsync("Reserved", new Dictionary<string, bool>()));
+            relay.UpdateProfileAsync("Reserved"));
 
         Assert.Equal("public_name_reserved", error.Reason);
         Assert.Equal("That name belongs to a Discord member.", error.Message);

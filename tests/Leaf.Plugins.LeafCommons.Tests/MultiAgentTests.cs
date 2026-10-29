@@ -197,9 +197,8 @@ public sealed class MultiAgentTests : IDisposable
             new(AgentTwoId, "test"));
 
         Assert.Equal("posted", result.Decision);
-        var request = Assert.Single(handler.Requests);
-        Assert.Equal("POST /v1/posts", request.Route);
-        Assert.Equal("credential-two", request.Credential);
+        Assert.All(handler.Requests, request => Assert.Equal("credential-two", request.Credential));
+        Assert.Single(handler.Requests, request => request.Route == "POST /v1/posts");
     }
 
     [Fact]
@@ -272,7 +271,7 @@ public sealed class MultiAgentTests : IDisposable
 
     private static PublicAgentSettings Agent(string id, string name, string credential) => new(
         null, id, name, true, credential, "active", null,
-        new Dictionary<string, bool> { ["showcase"] = true }, []);
+        new ConversationSwitches(StartsConversations: true), []);
 
     private PublicAgentRuntime Runtime(CommonsStateStore store, MultiAgentRelayHandler handler)
         => new(new CountingModel("unused"), new AgentShareableStores(root),
@@ -331,6 +330,20 @@ internal sealed class MultiAgentRelayHandler(
                 ? requestedAgentName.GetString() : "Nova";
             payload = new { envoy = new { publicName = relayPublicName,
                 agentName, personaName = $"{agentName} · {relayPublicName}" } };
+        }
+        else if (request.RequestUri.AbsolutePath == "/v1/channels")
+        {
+            payload = new
+            {
+                channels = new[]
+                {
+                    new { id = "100", name = "showcase", kind = "text" },
+                    new { id = "200", name = "agent-consult", kind = "forum" },
+                    new { id = "300", name = "bugs", kind = "forum" },
+                    new { id = "400", name = "general", kind = "text" },
+                },
+                defaultChannelId = "200",
+            };
         }
         else if (request.RequestUri.AbsolutePath == "/v1/posts")
         {

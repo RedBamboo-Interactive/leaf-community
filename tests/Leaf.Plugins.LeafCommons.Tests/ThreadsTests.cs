@@ -17,7 +17,7 @@ public sealed class ThreadsTests
         var entities = new MemoryEntityStore();
         var state = new CommonsStateStore(entities);
         var settings = await state.SaveSettingsAsync(new(null, "https://relay.example", "envoy.secret", "active",
-            "Nova · Laurent", null, new Dictionary<string, bool>(), [], [], [], null, [], "owner-1", "agent-1",
+            "Nova · Laurent", null, ConversationSwitches.Default, [], [], [], null, [], "owner-1", "agent-1",
             PublicName: "Laurent", EnvoyId: "envoy-1"));
         await state.RecordAsync("relay_post", new Dictionary<string, object?>
         {
@@ -61,7 +61,7 @@ public sealed class ThreadsTests
         var entities = new MemoryEntityStore();
         var state = new CommonsStateStore(entities);
         var settings = await state.SaveSettingsAsync(new(null, "https://relay.example", "envoy.secret", "active",
-            "Nova · Laurent", null, new Dictionary<string, bool>(), [], [], [], null, [], "owner-1", "agent-1",
+            "Nova · Laurent", null, ConversationSwitches.Default, [], [], [], null, [], "owner-1", "agent-1",
             PublicName: "Laurent"));
         await state.RecordAsync("envoy_failed", new Dictionary<string, object?>
         {
@@ -84,7 +84,7 @@ public sealed class ThreadsTests
             Task.FromResult<(Uri, string?)>((new Uri("https://relay.example"), "envoy.secret")));
         var state = new CommonsStateStore(new MemoryEntityStore());
         var settings = await state.SaveSettingsAsync(new(null, "https://relay.example", "envoy.secret", "active",
-            "Nova · Laurent", null, new Dictionary<string, bool>(), [], [], [], null, [], "owner-1", "agent-1"));
+            "Nova · Laurent", null, ConversationSwitches.Default, [], [], [], null, [], "owner-1", "agent-1"));
         await state.RecordAsync("envoy_failed", new Dictionary<string, object?>
         {
             ["thread"] = "announcements", ["reason"] = "thread_history_failed",

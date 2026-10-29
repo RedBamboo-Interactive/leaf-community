@@ -12,7 +12,7 @@ public sealed class DigestTests
         var entities = new MemoryEntityStore();
         var state = new CommonsStateStore(entities);
         await state.SaveSettingsAsync(new(null, "https://relay.example", "credential", "active", "Nova", null,
-            new Dictionary<string, bool>(), [], [], [], "84092725", [], "owner-1", "agent-1"));
+            ConversationSwitches.Default, [], [], [], "84092725", [], "owner-1", "agent-1"));
         var audit = new MemoryAudit();
         var sink = new CommonsDigestSink(state, new DigestFormatter(), audit);
 
@@ -39,7 +39,7 @@ public sealed class DigestTests
     {
         var state = new CommonsStateStore(new MemoryEntityStore());
         await state.SaveSettingsAsync(new(null, "https://relay.example", "credential", "active", "Nova", null,
-            new Dictionary<string, bool>(), [], [], [], null, [], "owner-1", "agent-1"));
+            ConversationSwitches.Default, [], [], [], null, [], "owner-1", "agent-1"));
         for (var i = 0; i < 5; i++)
             await state.StoreDigestAsync("owner_notice", $"> External Leaf Community quote — owner notice\n> notice {i}", $"t{i}");
         var extensions = new CapturingPluginExtensions();

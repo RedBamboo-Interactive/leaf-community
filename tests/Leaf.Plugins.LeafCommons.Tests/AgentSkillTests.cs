@@ -89,9 +89,13 @@ public sealed class LeafCommunitySkillSeedTests
         foreach (var kind in new[] { "showcase", "consult", "open_question", "bug", "bug_report", "intro_draft" })
             Assert.Contains($"`{kind}`", skill);
         foreach (var code in new[] { "owner_agent_required", "agent_not_public", "invalid_brief",
-                     "scenario_disabled", "content-too-long", "sentinel_held", "sentinel_unavailable" })
+                     "starts_disabled", "unknown_channel", "content-too-long", "sentinel_held", "sentinel_unavailable" })
             Assert.Contains($"`{code}`", skill);
         Assert.Contains("Authorization: Bearer $REDLEAF_EXECUTION_TOKEN", skill);
+        foreach (var field in new[] { "channel", "ownerRequested" })
+            Assert.Contains($"`{field}`", skill);
+        Assert.Contains("Answers when spoken to", skill);
+        Assert.Contains("Starts conversations on its own", skill);
     }
 
     [Fact]
@@ -288,7 +292,7 @@ public sealed class AgentSkillLifecycleTests : IAsyncLifetime
         agents = agents.Select(agent => new
         {
             agentId = agent.Id, enabled = agent.Enabled, avatarSource = AvatarSources.AgentAvatar,
-            scenarioToggles = new Dictionary<string, bool>(), shareableFolders = Array.Empty<string>(),
+            shareableFolders = Array.Empty<string>(),
         }).ToArray(),
     };
 
@@ -326,6 +330,31 @@ public sealed class AgentSkillLifecycleTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Settings_save_the_two_conversation_switches_and_keep_them_when_left_out()
+    {
+        await PutSettingsAsync((AgentA, true));
+        var defaults = (await store.GetPublicAgentAsync(AgentA))!.Switches;
+        Assert.Equal(new ConversationSwitches(AnswersWhenSpokenTo: true, StartsConversations: false), defaults);
+
+        using var response = await http.PutAsJsonAsync("/api/apps/leaf-commons/settings", new
+        {
+            relayBaseUrl = "https://relay.example", publicName = "Pseudonym", relayConfirmedPublicName = "Pseudonym",
+            personalWords = Array.Empty<string>(), canaries = Array.Empty<string>(), linkAllowlist = Array.Empty<string>(),
+            agents = new[] { new { agentId = AgentA, enabled = true, avatarSource = AvatarSources.AgentAvatar,
+                shareableFolders = Array.Empty<string>(), answersWhenSpokenTo = false, startsConversations = true } },
+        });
+        var body = JsonNode.Parse(await response.Content.ReadAsStringAsync())!;
+        Assert.True(response.IsSuccessStatusCode, body.ToJsonString());
+        var agent = body["agents"]!.AsArray().Single(item => item!["agentId"]!.GetValue<string>() == AgentA)!;
+        Assert.False(agent["answersWhenSpokenTo"]!.GetValue<bool>());
+        Assert.True(agent["startsConversations"]!.GetValue<bool>());
+        Assert.Null(agent["scenarioToggles"]);
+
+        await PutSettingsAsync((AgentA, true));
+        Assert.Equal(new ConversationSwitches(false, true), (await store.GetPublicAgentAsync(AgentA))!.Switches);
+    }
+
+    [Fact]
     public async Task Settings_refuse_an_Agent_the_owner_does_not_own_before_any_skill_write()
     {
         using var response = await http.PutAsJsonAsync("/api/apps/leaf-commons/settings", Settings((Foreign, true)));
@@ -338,11 +367,11 @@ public sealed class AgentSkillLifecycleTests : IAsyncLifetime
     public async Task Startup_gives_already_public_Agents_the_skill_and_only_them()
     {
         await store.SavePublicAgentAsync(new(null, AgentA, "Agent A", true, null, "disconnected", null,
-            new Dictionary<string, bool>(), []));
+            ConversationSwitches.Default, []));
         await store.SavePublicAgentAsync(new(null, AgentB, "Agent B", false, null, "suspended", null,
-            new Dictionary<string, bool>(), []));
+            ConversationSwitches.Default, []));
         await store.SavePublicAgentAsync(new(null, Foreign, "Someone else's", true, null, "disconnected", null,
-            new Dictionary<string, bool>(), []));
+            ConversationSwitches.Default, []));
 
         await coordinator.StartAsync(CancellationToken.None);
         await coordinator.StartAsync(CancellationToken.None); // a second start changes nothing
@@ -392,8 +421,8 @@ public sealed class AgentSkillLifecycleTests : IAsyncLifetime
     public async Task Brief_route_accepts_only_the_public_Agent_from_a_private_discussion()
     {
         await store.SavePublicAgentAsync(new(null, AgentA, "Agent A", true, "credential-a", "active", null,
-            new Dictionary<string, bool>(), []));
-        var brief = new { kind = "consult", title = "Help with a build", content = "A short question." };
+            ConversationSwitches.Default, []));
+        var brief = new { kind = "consult", title = "Help with a build", content = "A short question.", ownerRequested = true };
 
         foreach (var caller in new[]
         {
@@ -422,7 +451,7 @@ public sealed class AgentSkillLifecycleTests : IAsyncLifetime
     public async Task Brief_validation_and_the_2000_character_filter_limit_are_reported_as_documented()
     {
         await store.SavePublicAgentAsync(new(null, AgentA, "Agent A", true, "credential-a", "active", null,
-            new Dictionary<string, bool>(), []));
+            ConversationSwitches.Default, []));
         var caller = Execution(AgentA, Owner, "discussion");
 
         var untitled = await PostBriefAsync(caller, new { kind = "bug", content = "Steps to reproduce." });
@@ -434,11 +463,32 @@ public sealed class AgentSkillLifecycleTests : IAsyncLifetime
             addresses = Enumerable.Range(0, 11).Select(i => $"envoy-{i}").ToArray() });
         Assert.Equal("invalid_brief", tooMany.Body["error"]!.GetValue<string>());
 
-        var atLimit = await PostBriefAsync(caller, new { kind = "showcase", content = new string('a', 2_000) });
+        var atLimit = await PostBriefAsync(caller, new { kind = "showcase", content = new string('a', 2_000), ownerRequested = true });
         Assert.Equal("posted", atLimit.Body["decision"]!.GetValue<string>());
-        var overLimit = await PostBriefAsync(caller, new { kind = "showcase", content = new string('a', 2_001) });
+        var overLimit = await PostBriefAsync(caller, new { kind = "showcase", content = new string('a', 2_001), ownerRequested = true });
         Assert.Equal(HttpStatusCode.OK, overLimit.Status);
         Assert.Equal("blocked", overLimit.Body["decision"]!.GetValue<string>());
         Assert.Equal("content-too-long", overLimit.Body["reason"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task A_brief_on_the_Agents_own_initiative_needs_the_starts_conversations_switch()
+    {
+        await store.SavePublicAgentAsync(new(null, AgentA, "Agent A", true, "credential-a", "active", null,
+            new ConversationSwitches(StartsConversations: false), []));
+        var caller = Execution(AgentA, Owner, "discussion");
+
+        var own = await PostBriefAsync(caller, new { kind = "showcase", content = "Something I made." });
+        Assert.Equal(HttpStatusCode.OK, own.Status);
+        Assert.Equal("blocked", own.Body["decision"]!.GetValue<string>());
+        Assert.Equal("starts_disabled", own.Body["reason"]!.GetValue<string>());
+
+        var asked = await PostBriefAsync(caller, new { kind = "showcase", content = "Something I made.", ownerRequested = true });
+        Assert.Equal("posted", asked.Body["decision"]!.GetValue<string>());
+
+        await store.SavePublicAgentAsync((await store.GetPublicAgentAsync(AgentA))! with
+            { Switches = new(StartsConversations: true) });
+        var allowed = await PostBriefAsync(caller, new { kind = "showcase", content = "Another thing I made." });
+        Assert.Equal("posted", allowed.Body["decision"]!.GetValue<string>());
     }
 }

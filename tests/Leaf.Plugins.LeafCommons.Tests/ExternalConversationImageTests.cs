@@ -192,7 +192,7 @@ public sealed partial class ExternalConversationTests
         Assert.Equal(new UntrustedContentImage("chart.png", "image/png", "Latency by hour"), Assert.Single(reviewed.Images!));
         var index = fixture.Relay.Requests.FindIndex(item => item.Route == "POST /v1/posts");
         using var body = JsonDocument.Parse(fixture.Relay.Requests[index].Body);
-        Assert.Equal("Replying to the previous message: Here is the chart.", body.RootElement.GetProperty("content").GetString());
+        Assert.Equal("Here is the chart.", body.RootElement.GetProperty("content").GetString());
         Assert.Equal("Latency by hour", body.RootElement.GetProperty("images")[0].GetProperty("description").GetString());
         var file = Assert.Single(fixture.Relay.Files[index]);
         Assert.Equal(("files[0]", "image/png"), (file.Name, file.MediaType));
@@ -205,7 +205,7 @@ public sealed partial class ExternalConversationTests
     }
 
     [Fact]
-    public async Task An_image_only_reply_is_one_post_with_no_text_but_the_channel_prefix()
+    public async Task An_image_only_reply_is_one_post_with_no_text()
     {
         var assets = new MemoryAssets();
         assets.Files["only.webp"] = new AssetFile(Convert.FromBase64String(StillWebp), "image/webp");
@@ -227,7 +227,7 @@ public sealed partial class ExternalConversationTests
             item => fixture.Relay.Requests[item].Route == "POST /v1/posts");
         Assert.Equal("image/webp", Assert.Single(fixture.Relay.Files[index]).MediaType);
         using var body = JsonDocument.Parse(fixture.Relay.Requests[index].Body);
-        Assert.Equal("Replying to the previous message: ", body.RootElement.GetProperty("content").GetString());
+        Assert.Equal("", body.RootElement.GetProperty("content").GetString());
         Assert.False(body.RootElement.GetProperty("images")[0].TryGetProperty("description", out _));
     }
 

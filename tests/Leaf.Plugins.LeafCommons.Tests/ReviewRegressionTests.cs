@@ -13,40 +13,74 @@ public sealed class ReviewRegressionTests : IDisposable
     public ReviewRegressionTests() => Directory.CreateDirectory(root);
     public void Dispose() { if (Directory.Exists(root)) Directory.Delete(root, true); }
 
+    private const string AgentId = "a7b059ac-f678-8b58-819b-1bcf3acb22db";
+
     [Fact]
     public async Task Verified_private_nova_brief_posts_immediately_without_a_decision_call()
     {
-        var entities = new MemoryEntityStore();
-        var state = new CommonsStateStore(entities);
-        await state.SaveSettingsAsync(new(null, "https://relay.example", "credential", "active", "Nova", null,
-            new Dictionary<string, bool> { ["consult"] = true }, [], [], [], null, [], "owner-1", "agent-1"));
+        var (state, entities) = await PublicAgentAsync();
         var title = "  Retry strategy — exact title  ";
         var content = "First line\r\nSecond line with  double spaces.\n";
         var model = new CountingModel("{\"action\":\"post\",\"content\":\"MODEL REPLACED THE BRIEF\"}");
-        var relay = new FakeRelay();
-        var runtime = new CommonsRuntime(model, new ShareableStore(root), relay, new OutboundFilter(new SecretScanner()), state, new NullDigestSink());
+        var relay = new MultiAgentRelayHandler();
 
-        var result = await runtime.PostBriefAsync(
-            new("consult", content, title, ["envoy-b"]), new("agent-1", "owner-1"));
+        var result = await Runtime(state, relay, model).PostBriefAsync(
+            new("consult", content, title, ["envoy-b"], OwnerRequested: true), new(AgentId, "owner-1"));
 
         Assert.Equal("posted", result.Decision);
-        Assert.Equal("m1", result.MessageId);
+        Assert.Equal("message-1", result.MessageId);
         Assert.Null(result.Reason);
         Assert.Equal(0, model.Calls);
-        var opened = Assert.Single(relay.Opened);
-        Assert.Equal("consult", opened.Scenario);
-        Assert.Equal(title, opened.Title);
-        Assert.Equal(content, opened.Content);
-        Assert.Equal(["envoy-b"], opened.Addresses);
+        // A consult goes to the relay's default consult forum, with the title and text as written.
+        var opened = JsonNode.Parse(Assert.Single(relay.Requests, item => item.Route == "POST /v1/posts").Body)!;
+        Assert.Equal("200", opened["channelId"]!.GetValue<string>());
+        Assert.Equal(title, opened["title"]!.GetValue<string>());
+        Assert.Equal(content, opened["content"]!.GetValue<string>());
+        Assert.Equal(["envoy-b"], opened["addresses"]!.AsArray().Select(item => item!.GetValue<string>()));
+        Assert.Null(opened["scenario"]);
         var history = Assert.Single(await state.ListBriefsAsync());
         Assert.Equal("consult", history.Kind);
         Assert.Equal(title, history.Title);
         Assert.Equal(CommonsStateStore.ContentHash(content), history.ContentHash);
         Assert.Equal("posted", history.Outcome);
-        Assert.Equal("m1", history.MessageId);
+        Assert.Equal("message-1", history.MessageId);
         var stored = Assert.Single(await entities.QueryAsync(new EntityQuery { TypeSlug = "leaf-commons-brief" }));
         Assert.Null(stored.Data["content"]);
         Assert.Null(stored.Data["addresses"]);
+    }
+
+    [Theory]
+    [InlineData("bug", null, "300")]
+    [InlineData("showcase", null, "100")]
+    [InlineData("intro_draft", null, "400")]
+    [InlineData("consult", "#bugs", "300")]
+    [InlineData("showcase", "400", "400")]
+    public async Task A_brief_goes_to_the_channel_it_names_or_the_one_its_kind_suggests(
+        string kind, string? channel, string expected)
+    {
+        var (state, _) = await PublicAgentAsync();
+        var relay = new MultiAgentRelayHandler();
+
+        var result = await Runtime(state, relay).PostBriefAsync(
+            new(kind, "A note.", "A title", Channel: channel, OwnerRequested: true), new(AgentId, "owner-1"));
+
+        Assert.Equal("posted", result.Decision);
+        var opened = JsonNode.Parse(Assert.Single(relay.Requests, item => item.Route == "POST /v1/posts").Body)!;
+        Assert.Equal(expected, opened["channelId"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task A_brief_naming_an_unknown_channel_is_refused_before_review()
+    {
+        var (state, _) = await PublicAgentAsync();
+        var relay = new MultiAgentRelayHandler();
+
+        var result = await Runtime(state, relay).PostBriefAsync(
+            new("showcase", "A note.", Channel: "nowhere", OwnerRequested: true), new(AgentId, "owner-1"));
+
+        Assert.Equal("rejected", result.Decision);
+        Assert.Equal("unknown_channel", result.Reason);
+        Assert.DoesNotContain(relay.Requests, item => item.Route == "POST /v1/posts");
     }
 
     [Fact]
@@ -63,7 +97,7 @@ public sealed class ReviewRegressionTests : IDisposable
     }
 
     [Fact]
-    public async Task Addressed_showcase_text_reply_posts_to_its_message_chain_with_plain_text_context()
+    public async Task Addressed_showcase_text_reply_posts_to_its_message_chain_and_leaves_the_context_line_to_the_relay()
     {
         var relay = new FakeRelay();
         var runner = new EnvoyRunner(
@@ -71,19 +105,18 @@ public sealed class ReviewRegressionTests : IDisposable
             new ShareableStore(root), relay, new OutboundFilter(new SecretScanner()),
             new MemoryAudit(), [], []);
 
-        var result = await runner.RunAsync(new("message:showcase-root", "channel_reply",
+        var result = await runner.RunAsync(new("message:showcase-root", "ping",
             "Hello! What's 2+2?", TriggerId: "live-1644", Addressed: true,
             Channel: "showcase", ReplyToDisplayName: "Laurent"));
 
         Assert.Equal("done", result.State);
         var reply = Assert.Single(relay.Replies);
         Assert.Equal("message:showcase-root", reply.ThreadRef);
-        Assert.Equal("channel_reply", reply.Scenario);
-        Assert.Equal("Replying to Laurent: 2 + 2 is 4.", reply.Content);
+        Assert.Equal("2 + 2 is 4.", reply.Content);
     }
 
     [Fact]
-    public async Task Addressed_text_channel_failure_posts_prefixed_safe_fallback()
+    public async Task Addressed_text_channel_failure_posts_the_exact_safe_fallback()
     {
         var relay = new FakeRelay();
         var runner = new EnvoyRunner(
@@ -91,15 +124,13 @@ public sealed class ReviewRegressionTests : IDisposable
             new ShareableStore(root), relay, new OutboundFilter(new SecretScanner()),
             new MemoryAudit(), [], []);
 
-        var result = await runner.RunAsync(new("message:showcase-root", "channel_reply",
+        var result = await runner.RunAsync(new("message:showcase-root", "ping",
             "question", TriggerId: "ping", Addressed: true,
             Channel: "showcase", ReplyToDisplayName: "<@123> Laurent"));
 
         Assert.Equal("failed", result.State);
         var reply = Assert.Single(relay.Replies);
-        Assert.Equal("channel_reply", reply.Scenario);
-        Assert.DoesNotContain("<@", reply.Content);
-        Assert.EndsWith(EnvoyRunner.CoverageFallback, reply.Content);
+        Assert.Equal(EnvoyRunner.CoverageFallback, reply.Content);
     }
 
     [Theory]
@@ -108,17 +139,12 @@ public sealed class ReviewRegressionTests : IDisposable
     [InlineData(502, "gateway_bad_gateway")]
     public async Task Addressed_model_failure_is_audited_and_delivers_owner_notice(int status, string reason)
     {
-        var entities = new MemoryEntityStore();
-        var state = new CommonsStateStore(entities);
-        await state.SaveSettingsAsync(new(null, "https://relay.example", "credential", "active", "Nova", null,
-            new Dictionary<string, bool> { ["consult"] = true }, [], [], [], "digest-1", [], "owner-1", "agent-1"));
+        var (state, entities) = await PublicAgentAsync();
         var model = new ThrowingModel(new ToolFreeGenerateException("fixture failure", reason, status));
         var digests = new CapturingDigestSink();
-        var runtime = new CommonsRuntime(model, new ShareableStore(root), new FakeRelay(),
-            new OutboundFilter(new SecretScanner()), state, digests);
 
-        var result = await runtime.HandleAsync(new("thread-1", "consult", "what is 2 + 2?",
-            TriggerId: "ping-1", Addressed: true));
+        var result = await Runtime(state, new MultiAgentRelayHandler(), model, digests).HandleAsync(AgentId,
+            new("thread-1", "ping", "what is 2 + 2?", TriggerId: "ping-1", Addressed: true));
 
         Assert.Equal("failed", result.State);
         Assert.Equal(reason, result.Summary);
@@ -137,23 +163,19 @@ public sealed class ReviewRegressionTests : IDisposable
     [Fact]
     public async Task Canary_in_brief_is_blocked_immediately_and_recorded_without_relay_delivery()
     {
-        var entities = new MemoryEntityStore();
-        var state = new CommonsStateStore(entities);
-        await state.SaveSettingsAsync(new(null, "https://relay.example", "credential", "active", "Nova", null,
-            new Dictionary<string, bool> { ["consult"] = true }, [], [], ["CANARY-BRIEF"], null, [], "owner-1", "agent-1"));
+        var (state, entities) = await PublicAgentAsync(canaries: ["CANARY-BRIEF"]);
         var model = new CountingModel("{\"action\":\"post\",\"content\":\"irrelevant\"}");
-        var relay = new FakeRelay();
-        var runtime = new CommonsRuntime(model, new ShareableStore(root), relay, new OutboundFilter(new SecretScanner()), state, new NullDigestSink());
+        var relay = new MultiAgentRelayHandler();
 
-        var result = await runtime.PostBriefAsync(
-            new("consult", "CANARY-BRIEF", "Safe title", ["envoy-b"]),
-            new("agent-1", "owner-1"));
+        var result = await Runtime(state, relay, model).PostBriefAsync(
+            new("consult", "CANARY-BRIEF", "Safe title", ["envoy-b"], OwnerRequested: true),
+            new(AgentId, "owner-1"));
 
         Assert.Equal("blocked", result.Decision);
         Assert.Equal("canary", result.Reason);
         Assert.Null(result.MessageId);
         Assert.Equal(0, model.Calls);
-        Assert.Empty(relay.Opened);
+        Assert.Empty(relay.Requests);
         var history = Assert.Single(await state.ListBriefsAsync());
         Assert.Equal("blocked", history.Outcome);
         Assert.Equal("canary", history.Reason);
@@ -166,25 +188,39 @@ public sealed class ReviewRegressionTests : IDisposable
     [Fact]
     public async Task Relay_rejected_brief_returns_reason_and_is_recorded_without_retry()
     {
-        var state = new CommonsStateStore(new MemoryEntityStore());
-        await state.SaveSettingsAsync(new(null, "https://relay.example", "credential", "active", "Nova", null,
-            new Dictionary<string, bool> { ["consult"] = true }, [], [], [], null, [], "owner-1", "agent-1"));
-        var relay = new RejectingBriefRelay("relay_link_not_allowed");
-        var runtime = new CommonsRuntime(new CountingModel("unused"), new ShareableStore(root), relay,
-            new OutboundFilter(new SecretScanner()), state, new NullDigestSink());
+        var (state, _) = await PublicAgentAsync();
+        var relay = new MultiAgentRelayHandler(rejectFirstPost: "link_not_allowed");
 
-        var result = await runtime.PostBriefAsync(
-            new("consult", "See https://github.com/example/repo", "Reference", []),
-            new("agent-1", "owner-1"));
+        var result = await Runtime(state, relay).PostBriefAsync(
+            new("consult", "See https://github.com/example/repo", "Reference", [], OwnerRequested: true),
+            new(AgentId, "owner-1"));
 
         Assert.Equal("rejected", result.Decision);
-        Assert.Equal("relay_link_not_allowed", result.Reason);
+        Assert.Equal("link_not_allowed", result.Reason);
         Assert.Null(result.MessageId);
-        Assert.Equal(1, relay.Calls);
+        Assert.Single(relay.Requests, item => item.Route == "POST /v1/posts");
         var history = Assert.Single(await state.ListBriefsAsync());
         Assert.Equal("rejected", history.Outcome);
-        Assert.Equal("relay_link_not_allowed", history.Reason);
+        Assert.Equal("link_not_allowed", history.Reason);
     }
+
+    private static async Task<(CommonsStateStore State, MemoryEntityStore Entities)> PublicAgentAsync(
+        ConversationSwitches? switches = null, string[]? canaries = null)
+    {
+        var entities = new MemoryEntityStore();
+        var state = new CommonsStateStore(entities);
+        await state.SaveOwnerSettingsAsync(new(null, "https://relay.example", "Laurent", [], canaries ?? [], [], "owner-1"));
+        await state.SavePublicAgentAsync(new(null, AgentId, "Nova", true, "credential", "active", null,
+            switches ?? ConversationSwitches.Default, [], RestrictedMode: true));
+        return (state, entities);
+    }
+
+    private PublicAgentRuntime Runtime(CommonsStateStore state, MultiAgentRelayHandler relay,
+        IToolFreeModelClient? model = null, IDigestSink? digests = null)
+        => new(model ?? new CountingModel("unused"), new AgentShareableStores(root),
+            new RelayClientFactory(new FixedHttpClientFactory(relay), state),
+            new OutboundFilter(new SecretScanner()), state, digests ?? new NullDigestSink(),
+            outboundReview: TestSentinel.Passing(new MemoryEntityStore()));
 
     [Fact]
     public async Task OAuth_callback_rejects_missing_state()
@@ -253,7 +289,7 @@ public sealed class ReviewRegressionTests : IDisposable
     }
 
     private static CommonsSettings Settings(string? owner) => new(null, "http://127.0.0.1:8787", null, "disconnected", "Nova", null,
-        new Dictionary<string, bool>(), [], [], [], null, [], owner, "agent-1");
+        ConversationSwitches.Default, [], [], [], null, [], owner, "agent-1");
 }
 
 internal sealed class CountingModel(string response) : IToolFreeModelClient
@@ -281,23 +317,6 @@ internal sealed class CapturingDigestSink : IDigestSink
     {
         Items.Add(digest);
         return Task.CompletedTask;
-    }
-}
-
-internal sealed class RejectingBriefRelay(string reason) : IEnvoyRelay
-{
-    public int Calls { get; private set; }
-    public Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default) =>
-        Task.FromResult<IReadOnlyList<RelayMessage>>([]);
-    public Task<RelayPostResult> PostAsync(string threadRef, string content,
-        IReadOnlyList<string>? addresses = null, string? idempotencyKey = null,
-        CancellationToken ct = default) => throw new NotSupportedException();
-    public Task<RelayPostResult> OpenAsync(string scenario, string? threadName, string content,
-        IReadOnlyList<string>? addresses = null, string? idempotencyKey = null,
-        CancellationToken ct = default)
-    {
-        Calls++;
-        return Task.FromResult(new RelayPostResult(false, reason));
     }
 }
 

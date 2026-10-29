@@ -101,13 +101,10 @@ public sealed class CommonsOutboundReview(
     }
 
     /// <summary>
-    /// A fixed notice that needs no review: exactly one of the notices, or exactly the channel
-    /// reply the runner builds from the trusted reply-to name. Any other prefix or suffix could be
-    /// model-written and is reviewed.
+    /// A fixed notice that needs no review: exactly one of the notices. Any prefix or suffix could
+    /// be model-written and is reviewed. The relay adds a chain reply's "Replying to" line itself.
     /// </summary>
-    public static bool IsFixedNotice(string content, string? replyToDisplayName)
-        => FixedNotices.Any(notice => content == notice
-            || content == EnvoyRunner.ChannelReplyContent(replyToDisplayName, notice));
+    public static bool IsFixedNotice(string content) => FixedNotices.Contains(content);
 
     public const string WithheldNotice =
         "I wrote a reply here but withheld it because it could have shared private information.";
@@ -131,7 +128,7 @@ public sealed class CommonsOutboundReview(
 /// </summary>
 public sealed class ReviewedEnvoyRelay(
     IEnvoyRelay inner, CommonsOutboundReview review, string agentEntityId, ICommonsAudit audit,
-    string? replyToDisplayName = null, string? ownerUserId = null) : IEnvoyRelay
+    string? ownerUserId = null) : IEnvoyRelay
 {
     public Task<IReadOnlyList<RelayMessage>> ReadHistoryAsync(string threadRef, CancellationToken ct = default)
         => inner.ReadHistoryAsync(threadRef, ct);
@@ -141,21 +138,16 @@ public sealed class ReviewedEnvoyRelay(
         => await RefusalAsync(threadRef, content, addresses, idempotencyKey, ct)
            ?? await inner.PostAsync(threadRef, content, addresses, idempotencyKey, ct);
 
-    public async Task<RelayPostResult> ReplyAsync(string threadRef, string scenario, string content,
+    public async Task<RelayPostResult> OpenAsync(string channelId, string? title, string content,
         IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
-        => await RefusalAsync(threadRef, content, addresses, idempotencyKey, ct)
-           ?? await inner.ReplyAsync(threadRef, scenario, content, addresses, idempotencyKey, ct);
-
-    public async Task<RelayPostResult> OpenAsync(string scenario, string? threadName, string content,
-        IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
-        => await RefusalAsync(scenario, $"{threadName}\n\n{content}", addresses, idempotencyKey, ct)
-           ?? await inner.OpenAsync(scenario, threadName, content, addresses, idempotencyKey, ct);
+        => await RefusalAsync(channelId, $"{title}\n\n{content}", addresses, idempotencyKey, ct)
+           ?? await inner.OpenAsync(channelId, title, content, addresses, idempotencyKey, ct);
 
     private async Task<RelayPostResult?> RefusalAsync(string threadRef, string content,
         IReadOnlyList<string>? addresses, string? idempotencyKey, CancellationToken ct)
     {
         // Addresses are model-chosen, so a notice that carries any is reviewed too.
-        if (addresses is not { Count: > 0 } && CommonsOutboundReview.IsFixedNotice(content, replyToDisplayName))
+        if (addresses is not { Count: > 0 } && CommonsOutboundReview.IsFixedNotice(content))
             return null;
         var text = addresses is { Count: > 0 } ? $"{content}\n\n[addresses] {string.Join(", ", addresses)}" : content;
         var verdict = await review.ReviewAsync(agentEntityId, threadRef, text,

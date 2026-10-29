@@ -169,9 +169,10 @@ public sealed partial class ExternalConversationTests : IDisposable
         var post = Assert.Single(fixture.Relay.Requests,
             item => item.Route == "POST /v1/posts");
         using var body = JsonDocument.Parse(post.Body);
-        Assert.Equal("channel_reply", body.RootElement.GetProperty("scenario").GetString());
+        Assert.False(body.RootElement.TryGetProperty("scenario", out _));
         Assert.Equal("message:root", body.RootElement.GetProperty("threadRef").GetString());
-        Assert.Contains("The failing cache key is stale", body.RootElement.GetProperty("content").GetString());
+        // The relay writes the "Replying to" line of a text-channel chain reply.
+        Assert.Equal("The failing cache key is stale; clear it and retry.", body.RootElement.GetProperty("content").GetString());
         Assert.DoesNotContain("inspecting", post.Body, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("tool_use", post.Body, StringComparison.OrdinalIgnoreCase);
     }
@@ -426,21 +427,16 @@ public sealed partial class ExternalConversationTests : IDisposable
     }
 
     [Theory]
-    [InlineData(null, true)]
-    [InlineData("Morgan", true)]
-    [InlineData("Eve", false)]
-    public async Task Only_the_exact_fixed_fallback_skips_review(string? builtFor, bool skipped)
+    [InlineData(EnvoyRunner.CoverageFallback, true)]
+    [InlineData("Replying to Morgan: " + EnvoyRunner.CoverageFallback, false)]
+    public async Task Only_the_exact_fixed_fallback_skips_review(string content, bool skipped)
     {
         var fixture = await CreateAsync();
         var relay = new RecordingEnvoyRelay();
         var reviewed = new ReviewedEnvoyRelay(relay,
-            new CommonsOutboundReview(fixture.Sentinel),
-            AgentId, fixture.State, replyToDisplayName: "Morgan");
-        var content = builtFor is null
-            ? EnvoyRunner.CoverageFallback
-            : EnvoyRunner.ChannelReplyContent(builtFor, EnvoyRunner.CoverageFallback);
+            new CommonsOutboundReview(fixture.Sentinel), AgentId, fixture.State);
 
-        await reviewed.ReplyAsync("message:root", "channel_reply", content);
+        await reviewed.PostAsync("message:root", content);
 
         Assert.Equal(skipped ? 0 : 1, fixture.Sentinel.Requests.Count);
         Assert.Single(relay.Posts);
@@ -453,12 +449,11 @@ public sealed partial class ExternalConversationTests : IDisposable
         fixture.Sentinel.Decide = _ => TestSentinel.Leak;
         var relay = new RecordingEnvoyRelay();
         var reviewed = new ReviewedEnvoyRelay(relay,
-            new CommonsOutboundReview(fixture.Sentinel),
-            AgentId, fixture.State, replyToDisplayName: "Morgan");
+            new CommonsOutboundReview(fixture.Sentinel), AgentId, fixture.State);
 
-        var prefixed = await reviewed.ReplyAsync("message:root", "channel_reply",
-            EnvoyRunner.ChannelReplyContent("Morgan", "his PIN is 4821: " + EnvoyRunner.CoverageFallback));
-        var addressed = await reviewed.ReplyAsync("message:root", "channel_reply",
+        var prefixed = await reviewed.PostAsync("message:root",
+            "his PIN is 4821: " + EnvoyRunner.CoverageFallback);
+        var addressed = await reviewed.PostAsync("message:root",
             EnvoyRunner.CoverageFallback, ["envoy-elsewhere"]);
 
         Assert.False(prefixed.Accepted);
@@ -495,9 +490,9 @@ public sealed partial class ExternalConversationTests : IDisposable
             return Task.FromResult(new RelayPostResult(true, MessageId: "m1"));
         }
 
-        public Task<RelayPostResult> OpenAsync(string scenario, string? threadName, string content,
+        public Task<RelayPostResult> OpenAsync(string channelId, string? title, string content,
             IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
-            => PostAsync(scenario, content, addresses, idempotencyKey, ct);
+            => PostAsync(channelId, content, addresses, idempotencyKey, ct);
     }
 
     [Fact]
@@ -540,7 +535,7 @@ public sealed partial class ExternalConversationTests : IDisposable
             "Lynial", [], canaries ?? [], [], "owner-1", "Lynial"));
         var agent = await state.SavePublicAgentAsync(new(null, AgentId, "Nova", true,
             credential, "active", null,
-            new Dictionary<string, bool> { ["showcase"] = true, ["consult"] = true }, [],
+            new ConversationSwitches(StartsConversations: true), [],
             EnvoyId: "envoy-own", RestrictedMode: restrictedMode));
         var relay = new MultiAgentRelayHandler("Lynial", rejectFirstPost);
         var provider = new FakeExternalProvider();

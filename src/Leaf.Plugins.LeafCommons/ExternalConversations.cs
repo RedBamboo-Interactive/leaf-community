@@ -21,7 +21,6 @@ public sealed record CommonsExternalConversation(
     string? SessionId,
     string? CursorEpoch,
     long CursorSequence,
-    string ReplyScenario,
     string? Channel,
     DateTimeOffset UpdatedAt)
 {
@@ -86,7 +85,6 @@ public sealed class CommonsExternalConversationStore(IEntityStore entities)
             ["session_id"] = value.SessionId,
             ["cursor_epoch"] = value.CursorEpoch,
             ["cursor_sequence"] = value.CursorSequence,
-            ["reply_scenario"] = value.ReplyScenario,
             ["channel"] = value.Channel,
             ["outbound_reviews"] = value.OutboundReviews?.DeepClone(),
             ["review_wait_uid"] = value.ReviewWaitUid,
@@ -122,7 +120,7 @@ public sealed class CommonsExternalConversationStore(IEntityStore entities)
             Number(data, "generation", 1), Text(data, "provider_id"),
             Text(data, "conversation_id"), Text(data, "session_id"),
             Text(data, "cursor_epoch"), Number(data, "cursor_sequence", 0),
-            Text(data, "reply_scenario") ?? "consult_reply", Text(data, "channel"),
+            Text(data, "channel"),
             DateTimeOffset.TryParse(Text(data, "updated_at"), out var updated)
                 ? updated : entity.UpdatedAt)
         {
@@ -317,12 +315,8 @@ public sealed class PublicAgentConversationCoordinator(
             var record = await conversations.FindAsync(agent.AgentEntityId, request.ThreadRef, ct)
                 ?? new CommonsExternalConversation(null, bindingId, agent.AgentEntityId,
                     request.ThreadRef, 1, null, null, null, null, 0,
-                    ReplyScenario(request.Kind), request.Channel, DateTimeOffset.UtcNow);
-            record = record with
-            {
-                ReplyScenario = ReplyScenario(request.Kind),
-                Channel = request.Channel,
-            };
+                    request.Channel, DateTimeOffset.UtcNow);
+            record = record with { Channel = request.Channel };
             var quality = await runtimeOptions.ResolveForAgentAsync(agent.AgentEntityId, ct);
             // A session runs on the compute it was opened with. When the Agent's mode no longer
             // matches, the thread moves to a new generation on the right one.
@@ -702,18 +696,18 @@ public sealed class PublicAgentConversationCoordinator(
             ? new FilterDecision(true, null)
             : filter.Check(text, configuration.Owner.PersonalWords, configuration.Owner.Canaries, MaximumSettledText);
         await audit.RecordAsync("filter_decision", Metadata(agent.AgentEntityId,
-            ("thread", record.ThreadRef), ("scenario", record.ReplyScenario),
+            ("thread", record.ThreadRef),
             ("delivery", "settled-final"), ("message_uid", message.MessageUid),
             ("allowed", decision.Allowed), ("rule", decision.Rule),
             ("alarm", decision.Alarm)), ct);
         if (!decision.Allowed)
         {
             await TryFallbackAsync(agent, configuration.Owner,
-                new(record.ThreadRef, record.ReplyScenario, "", Addressed: true,
+                new(record.ThreadRef, "ping", "", Addressed: true,
                     Channel: record.Channel), decision.Rule ?? "filter_blocked", ct,
                 message.MessageUid);
             await audit.RecordAsync("envoy_blocked", Metadata(agent.AgentEntityId,
-                ("thread", record.ThreadRef), ("scenario", record.ReplyScenario),
+                ("thread", record.ThreadRef),
                 ("reason", decision.Rule ?? "filter_blocked"), ("alarm", decision.Alarm)), ct);
             await digests.DeliverAsync(new("owner_notice",
                 $"A Public Agent answer was withheld by local rule `{decision.Rule ?? "filter_blocked"}`. The blocked text was not sent.",
@@ -765,7 +759,7 @@ public sealed class PublicAgentConversationCoordinator(
         if (!verdict.Allowed)
         {
             await TryFallbackSafelyAsync(agent, configuration.Owner,
-                new(record.ThreadRef, record.ReplyScenario, "", Addressed: true, Channel: record.Channel),
+                new(record.ThreadRef, "ping", "", Addressed: true, Channel: record.Channel),
                 verdict.Unavailable ? "sentinel_unavailable" : "sentinel_held", ct, message.MessageUid,
                 verdict.Unavailable ? CommonsOutboundReview.UnavailableNotice : CommonsOutboundReview.WithheldNotice);
             await digests.DeliverAsync(new("owner_notice", verdict.Unavailable
@@ -785,10 +779,10 @@ public sealed class PublicAgentConversationCoordinator(
             if (file is null || mediaType is null)
             {
                 await TryFallbackSafelyAsync(agent, configuration.Owner,
-                    new(record.ThreadRef, record.ReplyScenario, "", Addressed: true, Channel: record.Channel),
+                    new(record.ThreadRef, "ping", "", Addressed: true, Channel: record.Channel),
                     "image_unreadable", ct, message.MessageUid);
                 await audit.RecordAsync("envoy_failed", Metadata(agent.AgentEntityId,
-                    ("thread", record.ThreadRef), ("scenario", record.ReplyScenario),
+                    ("thread", record.ThreadRef),
                     ("reason", "image_unreadable"), ("steps", 0)), ct);
                 await digests.DeliverAsync(new("owner_notice",
                     "A Public Agent answer could not be delivered: image_unreadable.",
@@ -798,32 +792,31 @@ public sealed class PublicAgentConversationCoordinator(
             outbound.Add(new(file.Bytes, mediaType, CommonsImages.Caption(image.Description)));
         }
 
+        // The relay starts a text-channel chain reply with a "Replying to" line, so those parts
+        // leave room for it under Discord's 2,000 characters.
         var chunks = CommonsMessageChunker.Split(content,
-            record.ReplyScenario == "channel_reply" ? 1_850 : 2_000);
+            record.ThreadRef.StartsWith("message:", StringComparison.Ordinal) ? 1_850 : 2_000);
         if (chunks.Count == 0) chunks = [""];
         for (var index = 0; index < chunks.Count; index++)
         {
-            var delivered = record.ReplyScenario == "channel_reply"
-                ? EnvoyRunner.ChannelReplyContent("the previous message", chunks[index])
-                : chunks[index];
             // The images travel with the last part of the reply, after the text they illustrate.
             IReadOnlyList<RelayOutboundImage> attached = index == chunks.Count - 1 ? outbound : [];
-            var posted = await relays.For(agent.AgentEntityId).ReplyAsync(
-                record.ThreadRef, record.ReplyScenario, delivered, attached, [],
+            var posted = await relays.For(agent.AgentEntityId).PostAsync(
+                record.ThreadRef, chunks[index], attached, [],
                 $"commons-settled-{message.MessageUid}-{index}", ct);
             await audit.RecordAsync("relay_post", Metadata(agent.AgentEntityId,
-                ("thread", record.ThreadRef), ("scenario", record.ReplyScenario),
+                ("thread", record.ThreadRef),
                 ("delivery", "settled-final"), ("message_uid", message.MessageUid),
                 ("chunk", index), ("accepted", posted.Accepted),
                 ("code", posted.Code), ("messageId", posted.MessageId), ("images", attached.Count)), ct);
             if (!posted.Accepted)
             {
                 await TryFallbackSafelyAsync(agent, configuration.Owner,
-                    new(record.ThreadRef, record.ReplyScenario, "", Addressed: true,
+                    new(record.ThreadRef, "ping", "", Addressed: true,
                         Channel: record.Channel),
                     posted.Code ?? "relay_rejected", ct, message.MessageUid);
                 await audit.RecordAsync("envoy_failed", Metadata(agent.AgentEntityId,
-                    ("thread", record.ThreadRef), ("scenario", record.ReplyScenario),
+                    ("thread", record.ThreadRef),
                     ("reason", posted.Code ?? "relay_rejected"), ("steps", 0)), ct);
                 await digests.DeliverAsync(new("owner_notice",
                     $"A Public Agent answer could not be delivered: {SafeCode(posted.Code)}.",
@@ -832,7 +825,7 @@ public sealed class PublicAgentConversationCoordinator(
             }
         }
         await audit.RecordAsync("envoy_done", Metadata(agent.AgentEntityId,
-            ("thread", record.ThreadRef), ("scenario", record.ReplyScenario),
+            ("thread", record.ThreadRef),
             ("message_uid", message.MessageUid), ("chunks", chunks.Count), ("images", outbound.Count)), ct);
         await digests.DeliverAsync(new("consult_answer", content,
             record.ThreadRef, agent.AgentEntityId), ct);
@@ -852,19 +845,14 @@ public sealed class PublicAgentConversationCoordinator(
         string? fallback = null)
     {
         if (!request.Addressed || string.IsNullOrWhiteSpace(request.ThreadRef)) return;
-        var scenario = ReplyScenario(request.Kind);
-        fallback ??= EnvoyRunner.CoverageFallback;
-        var content = scenario == "channel_reply"
-            ? EnvoyRunner.ChannelReplyContent(request.ReplyToDisplayName ?? "the previous message",
-                fallback)
-            : fallback;
+        var content = fallback ?? EnvoyRunner.CoverageFallback;
         var decision = filter.Check(content, owner.PersonalWords, owner.Canaries);
         if (!decision.Allowed) return;
-        var posted = await relays.For(agent.AgentEntityId).ReplyAsync(request.ThreadRef,
-            scenario, content, [],
+        var posted = await relays.For(agent.AgentEntityId).PostAsync(request.ThreadRef,
+            content, [], [],
             $"commons-fallback-{messageUid ?? request.TriggerId ?? Guid.NewGuid().ToString("N")}", ct);
         await audit.RecordAsync("relay_post", Metadata(agent.AgentEntityId,
-            ("thread", request.ThreadRef), ("scenario", scenario),
+            ("thread", request.ThreadRef),
             ("delivery", "safe-fallback"), ("accepted", posted.Accepted),
             ("code", posted.Code), ("messageId", posted.MessageId),
             ("reason", reason)), ct);
@@ -905,7 +893,7 @@ public sealed class PublicAgentConversationCoordinator(
                     StringComparison.OrdinalIgnoreCase));
             if (agent is null) return;
             await TryFallbackSafelyAsync(agent, configuration.Owner,
-                new(record.ThreadRef, record.ReplyScenario, "", Addressed: true,
+                new(record.ThreadRef, "ping", "", Addressed: true,
                     Channel: record.Channel), reason, CancellationToken.None);
             await digests.DeliverAsync(new("owner_notice",
                 $"A Public Agent answer could not be read from its settled session: {reason}.",
@@ -931,13 +919,6 @@ public sealed class PublicAgentConversationCoordinator(
         => providers.FirstOrDefault(provider => provider.CanHandle(agentId))
             ?? throw new InvalidOperationException(
                 $"No external conversation provider handles Agent '{agentId}'");
-
-    internal static string ReplyScenario(string kind) => kind switch
-    {
-        "channel_reply" => "channel_reply",
-        "bug" or "bug_report" => "bug",
-        _ => "consult_reply",
-    };
 
     internal static ExternalRequestor Requestor(string? raw)
     {

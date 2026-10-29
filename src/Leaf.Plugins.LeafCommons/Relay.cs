@@ -16,6 +16,9 @@ public sealed record RelayProfile(string PublicName, string PersonaName, string?
 public sealed record RelayThreadSummary(
     string ThreadRef, string ChannelName, string Title, DateTimeOffset LastActivityAt,
     string LastSnippet, bool Unread, string? Scenario);
+/// <summary>A channel the relay lets this Envoy write in.</summary>
+public sealed record RelayChannel(string Id, string Name, string Kind);
+public sealed record RelayChannels(IReadOnlyList<RelayChannel> Channels, string? DefaultChannelId);
 public sealed record RelayThreadAuthor(string Kind, string Name, string? AvatarUrl = null, string? EnvoyId = null);
 public sealed record RelayThreadMessage(
     string Id, DateTimeOffset At, RelayThreadAuthor Author, string Text, string? Scenario = null,
@@ -37,15 +40,14 @@ public sealed class RelayHttpClient(
     Func<TimeSpan, CancellationToken, Task>? delay = null) : IEnvoyRelay, IAvatarUploader
 {
     public Task<RelayProfile> ReadProfileAsync(CancellationToken ct = default)
-        => PatchProfileAsync(null, null, null, ct);
+        => PatchProfileAsync(null, null, ct);
 
-    public async Task<Uri> BuildAuthorizeUriAsync(Uri callback, IEnumerable<string> scenarios,
+    public async Task<Uri> BuildAuthorizeUriAsync(Uri callback,
         CancellationToken ct = default, string? agentEntityId = null, string? agentName = null)
     {
         var (baseUri, _) = await settings(ct).ConfigureAwait(false);
         if (!(callback.Scheme == "leaf" || (callback.Scheme == "http" && callback.IsLoopback))) throw new ArgumentException("OAuth callback must be leaf: or loopback HTTP");
-        var query = "/v1/oauth/authorize?connectorRedirectUri=" + Uri.EscapeDataString(callback.ToString())
-            + "&scenarios=" + Uri.EscapeDataString(string.Join(',', scenarios));
+        var query = "/v1/oauth/authorize?connectorRedirectUri=" + Uri.EscapeDataString(callback.ToString());
         if (!string.IsNullOrWhiteSpace(agentEntityId))
             query += "&agentEntityId=" + Uri.EscapeDataString(agentEntityId);
         if (!string.IsNullOrWhiteSpace(agentName))
@@ -70,20 +72,17 @@ public sealed class RelayHttpClient(
             String(envoy, "agentName"));
     }
 
-    public async Task<RelayProfile> UpdateProfileAsync(
-        string publicName, IReadOnlyDictionary<string, bool> scenarioToggles,
-        CancellationToken ct = default)
+    public async Task<RelayProfile> UpdateProfileAsync(string publicName, CancellationToken ct = default)
     {
         var (baseUri, credential) = await settings(ct).ConfigureAwait(false);
-        return await UpdateProfileAtAsync(baseUri, credential, publicName, scenarioToggles, ct);
+        return await UpdateProfileAtAsync(baseUri, credential, publicName, ct);
     }
 
     public async Task<RelayProfile> UpdateProfileAtAsync(
-        Uri baseUri, string? credential, string publicName,
-        IReadOnlyDictionary<string, bool> scenarioToggles, CancellationToken ct = default)
+        Uri baseUri, string? credential, string publicName, CancellationToken ct = default)
     {
         using var response = await SendAuthenticatedAsync(baseUri, credential, HttpMethod.Patch,
-            "/v1/profile", JsonContent.Create(new { publicName, scenarioToggles }), ct);
+            "/v1/profile", JsonContent.Create(new { publicName }), ct);
         using var json = await ReadJsonAsync(response, ct);
         if (!response.IsSuccessStatusCode) throw RelayError(response, json.RootElement, "profile_update_failed");
         var envoy = json.RootElement.TryGetProperty("envoy", out var wrapped)
@@ -99,21 +98,16 @@ public sealed class RelayHttpClient(
     }
 
     public async Task<RelayProfile> UpdateAgentProfileAsync(
-        string publicName, string agentName, IReadOnlyDictionary<string, bool> scenarioToggles,
-        CancellationToken ct = default)
-        => await PatchProfileAsync(publicName, agentName, scenarioToggles, ct);
+        string publicName, string agentName, CancellationToken ct = default)
+        => await PatchProfileAsync(publicName, agentName, ct);
 
     public async Task<RelayProfile> PatchProfileAsync(
-        string? publicName, string? agentName,
-        IReadOnlyDictionary<string, bool>? scenarioToggles,
-        CancellationToken ct = default)
+        string? publicName, string? agentName, CancellationToken ct = default)
     {
         var (baseUri, credential) = await settings(ct).ConfigureAwait(false);
         var body = new JsonObject();
         if (publicName is not null) body["publicName"] = publicName;
         if (agentName is not null) body["agentName"] = agentName;
-        if (scenarioToggles is not null)
-            body["scenarioToggles"] = JsonSerializer.SerializeToNode(scenarioToggles);
         using var response = await SendAuthenticatedAsync(baseUri, credential, HttpMethod.Patch,
             "/v1/profile", JsonContent.Create(body), ct);
         using var json = await ReadJsonAsync(response, ct);
@@ -282,40 +276,27 @@ public sealed class RelayHttpClient(
     }
 
     public Task<RelayPostResult> PostAsync(string threadRef, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
-    {
-        return ReplyAsync(threadRef, "consult_reply", content, addresses, idempotencyKey, ct);
-    }
-
-    public Task<RelayPostResult> ReplyAsync(string threadRef, string scenario, string content,
-        IReadOnlyList<string>? addresses = null, string? idempotencyKey = null,
-        CancellationToken ct = default)
-    {
-        var body = new { scenario, threadRef, content, addresses = addresses ?? [], idempotencyKey = idempotencyKey ?? Guid.NewGuid().ToString("N") };
-        return PostBodyAsync(body, ct);
-    }
+        => PostAsync(threadRef, content, [], addresses, idempotencyKey, ct);
 
     /// <summary>
-    /// A reply that carries images: multipart <c>payload_json</c> plus <c>files[n]</c>. Without
-    /// images it is the ordinary JSON reply, so a relay that predates images sees no change.
+    /// A reply that may carry images: multipart <c>payload_json</c> plus <c>files[n]</c>. Without
+    /// images it is an ordinary JSON post.
     /// </summary>
-    public Task<RelayPostResult> ReplyAsync(string threadRef, string scenario, string content,
+    public Task<RelayPostResult> PostAsync(string threadRef, string content,
         IReadOnlyList<RelayOutboundImage> images, IReadOnlyList<string>? addresses = null,
         string? idempotencyKey = null, CancellationToken ct = default)
     {
-        if (images.Count == 0) return ReplyAsync(threadRef, scenario, content, addresses, idempotencyKey, ct);
-        var body = new
-        {
-            scenario, threadRef, content, addresses = addresses ?? [],
-            idempotencyKey = idempotencyKey ?? Guid.NewGuid().ToString("N"),
-            images = images.Select(image => image.Description is null
-                ? new JsonObject() : new JsonObject { ["description"] = image.Description }).ToArray(),
-        };
+        var body = PostBody(content, addresses, idempotencyKey);
+        body["threadRef"] = threadRef;
+        if (images.Count == 0) return PostBodyAsync(body, ct);
+        body["images"] = new JsonArray(images.Select(image => (JsonNode)(image.Description is null
+            ? new JsonObject() : new JsonObject { ["description"] = image.Description })).ToArray());
         return PostBodyAsync(body, ct, () =>
         {
             // Quoted names and a plain text payload part, as browsers send them: every multipart
             // parser (the Workers runtime included) reads payload_json as a string field.
             var form = new MultipartFormDataContent();
-            var payload = new ByteArrayContent(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(body)));
+            var payload = new ByteArrayContent(Encoding.UTF8.GetBytes(body.ToJsonString()));
             payload.Headers.ContentDisposition = new ContentDispositionHeaderValue("form-data") { Name = "\"payload_json\"" };
             form.Add(payload);
             for (var index = 0; index < images.Count; index++)
@@ -333,13 +314,38 @@ public sealed class RelayHttpClient(
         });
     }
 
-    public Task<RelayPostResult> OpenAsync(string scenario, string? threadName, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
+    public Task<RelayPostResult> OpenAsync(string channelId, string? title, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
     {
-        var body = new { scenario, threadName, content, addresses = addresses ?? [], idempotencyKey = idempotencyKey ?? Guid.NewGuid().ToString("N") };
+        var body = PostBody(content, addresses, idempotencyKey);
+        body["channelId"] = channelId;
+        if (!string.IsNullOrWhiteSpace(title)) body["title"] = title;
         return PostBodyAsync(body, ct);
     }
 
-    private async Task<RelayPostResult> PostBodyAsync<T>(T body, CancellationToken ct, Func<HttpContent>? content = null)
+    private static JsonObject PostBody(string content, IReadOnlyList<string>? addresses, string? idempotencyKey) => new()
+    {
+        ["content"] = content,
+        ["addresses"] = new JsonArray((addresses ?? []).Select(address => (JsonNode?)address).ToArray()),
+        ["idempotencyKey"] = idempotencyKey ?? Guid.NewGuid().ToString("N"),
+    };
+
+    /// <summary>The channels this Envoy may post in, and the forum for questions to the community.</summary>
+    public async Task<RelayChannels> GetChannelsAsync(CancellationToken ct = default)
+    {
+        using var response = await SendAsync(HttpMethod.Get, "/v1/channels", null, ct);
+        if (response.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.NotImplemented)
+            throw new RelayFeatureUnavailableException("channels");
+        using var json = await ReadJsonAsync(response, ct);
+        if (!response.IsSuccessStatusCode) throw RelayError(response, json.RootElement, "channels_failed");
+        var channels = json.RootElement.TryGetProperty("channels", out var items) && items.ValueKind == JsonValueKind.Array
+            ? items.EnumerateArray().Select(item => new RelayChannel(String(item, "id") ?? "",
+                String(item, "name") ?? "", String(item, "kind") ?? "text"))
+                .Where(item => item.Id.Length > 0).ToArray()
+            : [];
+        return new(channels, String(json.RootElement, "defaultChannelId"));
+    }
+
+    private async Task<RelayPostResult> PostBodyAsync(JsonObject body, CancellationToken ct, Func<HttpContent>? content = null)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -454,7 +460,6 @@ public sealed class ConnectorCore(
                 && threadNode.ValueKind == JsonValueKind.String
                 ? threadNode.GetString() : null;
             var content = frame.TryGetProperty("content", out var contentNode) ? contentNode.GetString() ?? "" : frame.TryGetProperty("reason", out var reason) ? reason.GetString() ?? "owner notice" : "owner notice";
-            var kind = type == "ping" && frame.TryGetProperty("scenario", out var scenario) ? scenario.GetString() ?? "consult_reply" : type;
             var sender = frame.TryGetProperty("sender", out var senderNode) ? senderNode.GetRawText() : null;
             var replyToDisplayName = frame.TryGetProperty("sender", out var replySender)
                 && replySender.ValueKind == JsonValueKind.Object
@@ -490,7 +495,7 @@ public sealed class ConnectorCore(
                         messageId, authorDisplayName, timestamp, operation, suspendedBy), ct);
             }
             else
-                await handler(new(thread, kind, content, sender, id, Addressed: type == "ping",
+                await handler(new(thread, type!, content, sender, id, Addressed: type == "ping",
                     Channel: channel, ReplyToDisplayName: replyToDisplayName,
                     Images: images, OmittedImages: omittedImages), ct);
         }

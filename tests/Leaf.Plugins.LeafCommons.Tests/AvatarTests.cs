@@ -13,7 +13,7 @@ public sealed class AvatarTests
     public void Avatar_source_defaults_to_agent_avatar()
     {
         var settings = new CommonsSettings(null, "https://relay.example", null, "disconnected", "Nova", null,
-            new Dictionary<string, bool>(), [], [], [], null, []);
+            ConversationSwitches.Default, [], [], [], null, []);
         Assert.Equal(AvatarSources.AgentAvatar, settings.AvatarSource);
     }
 
@@ -179,7 +179,7 @@ public sealed class AvatarTests
     {
         var store = new CommonsStateStore(entities);
         await store.SaveSettingsAsync(new(null, "https://relay.example", "credential", "active", "Nova", null,
-            new Dictionary<string, bool>(), [], [], [], null, [], "owner-1", "agent-1"));
+            ConversationSwitches.Default, [], [], [], null, [], "owner-1", "agent-1"));
         return store;
     }
 

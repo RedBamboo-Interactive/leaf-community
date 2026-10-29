@@ -497,7 +497,7 @@ public sealed class PublicAgentCoordinator(
         var profile = string.IsNullOrWhiteSpace(settings.Credential)
             ? new RelayProfile(configuration.Owner.PublicName,
                 $"{entity.Name} \u00b7 {configuration.Owner.PublicName}", entity.Name)
-            : await relays.For(agentEntityId).PatchProfileAsync(null, entity.Name, null, ct);
+            : await relays.For(agentEntityId).PatchProfileAsync(null, entity.Name, ct);
         await state.SavePublicAgentAsync(settings with
         {
             AgentName = profile.AgentName ?? entity.Name,

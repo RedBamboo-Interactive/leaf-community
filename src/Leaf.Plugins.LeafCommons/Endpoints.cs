@@ -6,10 +6,10 @@ using Leaf.Sdk.Services;
 
 namespace Leaf.Plugins.LeafCommons;
 
+/// <summary>An owner's settings for one Agent. A switch left out keeps its saved value.</summary>
 public sealed record PublicAgentUpdate(
-    string AgentId, bool Enabled, string AvatarSource,
-    Dictionary<string, bool> ScenarioToggles, string[] ShareableFolders,
-    bool RestrictedMode = false);
+    string AgentId, bool Enabled, string AvatarSource, string[] ShareableFolders,
+    bool RestrictedMode = false, bool? AnswersWhenSpokenTo = null, bool? StartsConversations = null);
 
 public sealed record SettingsUpdate(
     string? RelayBaseUrl, string PublicName, string[] PersonalWords, string[] Canaries,
@@ -102,8 +102,7 @@ public static class CommonsEndpoints
                 PublicAgentSettings agent, OwnedAgent live, bool avatarChanged)
             {
                 var profile = await relays.For(agent.AgentEntityId).PatchProfileAsync(
-                    publicNamePending ? update.PublicName : null,
-                    live.Name, agent.ScenarioToggles, ct);
+                    publicNamePending ? update.PublicName : null, live.Name, ct);
                 publicNamePending = false;
                 if (!string.Equals(owner.PublicName, profile.PublicName, StringComparison.Ordinal)
                     || !string.Equals(owner.RelayConfirmedPublicName, profile.PublicName,
@@ -121,7 +120,7 @@ public static class CommonsEndpoints
                 var live = owned[requested.AgentId];
                 var current = await store.GetPublicAgentAsync(requested.AgentId, ct)
                     ?? new(null, requested.AgentId, live.Name, false, null, "disconnected",
-                        null, new Dictionary<string, bool>(), []);
+                        null, ConversationSwitches.Default, []);
                 var enable = requested.Enabled;
                 // Switching an Agent back on first lifts the owner's own relay suspension, before
                 // anything is saved, patched or connected. A suspension the owner cannot lift
@@ -150,7 +149,8 @@ public static class CommonsEndpoints
                 var saved = await store.SavePublicAgentAsync(current with
                 {
                     Enabled = enable, AgentName = live.Name,
-                    ScenarioToggles = requested.ScenarioToggles,
+                    Switches = new(requested.AnswersWhenSpokenTo ?? current.Switches.AnswersWhenSpokenTo,
+                        requested.StartsConversations ?? current.Switches.StartsConversations),
                     ShareableFolders = requested.ShareableFolders,
                     RestrictedMode = requested.RestrictedMode,
                     AvatarSource = requested.AvatarSource,
@@ -207,8 +207,7 @@ public static class CommonsEndpoints
                 projection["relayResume"] = JsonSerializer.SerializeToNode(resumes, JsonSerializerOptions.Web);
             return Results.Ok(projection);
         });
-        group.MapGet("/oauth/start", async (string callback, string agentId, string? scenarios,
-            bool? rejoin, IAuthContext auth, RelayClientFactory relays, CommonsStateStore store,
+        group.MapGet("/oauth/start", async (string callback, string agentId, bool? rejoin, IAuthContext auth, RelayClientFactory relays, CommonsStateStore store,
             AgentDirectory directory, CancellationToken ct) =>
         {
             var configuration = await store.GetConfigurationAsync(ct);
@@ -223,9 +222,7 @@ public static class CommonsEndpoints
                 rejoin == true, ct: ct);
             var callbackWithState = AddQuery(callback, "state", oauth.State);
             return Results.Ok(new { authorizeUrl = await relays.ForEnrollment(agentId)
-                .BuildAuthorizeUriAsync(callbackWithState,
-                    (scenarios ?? "showcase,consult,open_question,bug").Split(',', StringSplitOptions.RemoveEmptyEntries),
-                    ct, agentId, owned.Name) });
+                .BuildAuthorizeUriAsync(callbackWithState, ct, agentId, owned.Name) });
         });
         group.MapGet("/oauth/callback", async (string exchangeCode, string? state, IAuthContext auth,
             RelayClientFactory relays, CommonsStateStore store, AgentDirectory directory,
@@ -439,7 +436,8 @@ public static class CommonsEndpoints
                     avatarSource = value?.AvatarSource ?? AvatarSources.AgentAvatar,
                     avatarSyncStatus = value?.AvatarSyncStatus ?? "not-synced",
                     avatarSyncReason = value?.AvatarSyncReason,
-                    scenarioToggles = value?.ScenarioToggles ?? new Dictionary<string, bool>(),
+                    answersWhenSpokenTo = (value?.Switches ?? ConversationSwitches.Default).AnswersWhenSpokenTo,
+                    startsConversations = (value?.Switches ?? ConversationSwitches.Default).StartsConversations,
                     shareableFolders = value?.ShareableFolders ?? [],
                     restrictedMode = value?.RestrictedMode ?? false,
                     suspendedBy = value?.SuspendedBy,

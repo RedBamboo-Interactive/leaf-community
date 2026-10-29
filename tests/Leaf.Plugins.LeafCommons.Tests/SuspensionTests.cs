@@ -315,7 +315,7 @@ public sealed class SuspensionLifecycleTests : IAsyncLifetime
     private Task SaveAgentAsync(string id, bool enabled, string status, string? suspendedBy = null)
         => store.SavePublicAgentAsync(new(null, id, id == AgentA ? "Agent A" : "Agent B", enabled,
             id == AgentA ? "credential-a" : "credential-b", status, null,
-            new Dictionary<string, bool>(), [], SuspendedBy: suspendedBy));
+            ConversationSwitches.Default, [], SuspendedBy: suspendedBy));
 
     private object Settings(params (string Id, bool Enabled)[] agents) => new
     {
@@ -324,7 +324,7 @@ public sealed class SuspensionLifecycleTests : IAsyncLifetime
         agents = agents.Select(agent => new
         {
             agentId = agent.Id, enabled = agent.Enabled, avatarSource = AvatarSources.AgentAvatar,
-            scenarioToggles = new Dictionary<string, bool>(), shareableFolders = Array.Empty<string>(),
+            shareableFolders = Array.Empty<string>(),
         }).ToArray(),
     };
 
