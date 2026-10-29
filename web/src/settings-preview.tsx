@@ -21,7 +21,8 @@ const settings = {
     persona: "Nova · Lynial",
     avatarSource: "outfit",
     avatarSyncStatus: "synced",
-    scenarioToggles: { showcase: true, consult: true, open_question: true, bug: true },
+    answersWhenSpokenTo: true,
+    startsConversations: false,
     shareableFolders: ["T:/Projects/leaf-commons", "T:/Projects/leaf-commons-relay"],
   }, {
     agentId: "c816c9c9-c2c9-4d59-a2d8-caba898dcfaa",
@@ -32,7 +33,8 @@ const settings = {
     persona: "Ada · Lynial",
     avatarSource: "agent-avatar",
     avatarSyncStatus: "not-synced",
-    scenarioToggles: {},
+    answersWhenSpokenTo: true,
+    startsConversations: false,
     shareableFolders: [],
   }],
 }

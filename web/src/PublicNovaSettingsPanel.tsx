@@ -37,7 +37,8 @@ type AgentSettings = {
   avatarSource: "agent-avatar" | "outfit"
   avatarSyncStatus: "not-synced" | "pending" | "current" | "synced" | "failed"
   avatarSyncReason?: string
-  scenarioToggles: Record<string, boolean>
+  answersWhenSpokenTo: boolean
+  startsConversations: boolean
   shareableFolders: string[]
   restrictedMode: boolean
   suspendedBy?: "owner" | "host" | "filter" | "membership" | null
@@ -82,7 +83,8 @@ function savePayload(settings: Settings) {
       agentId: agent.agentId,
       enabled: agent.enabled,
       avatarSource: agent.avatarSource,
-      scenarioToggles: agent.scenarioToggles,
+      answersWhenSpokenTo: agent.answersWhenSpokenTo,
+      startsConversations: agent.startsConversations,
       shareableFolders: agent.shareableFolders,
       restrictedMode: agent.restrictedMode,
     })),
@@ -154,7 +156,7 @@ export function PublicNovaSettingsPanel() {
       const callback = `${window.location.origin}${base}/oauth/callback`
       const agent = saved.agents.find((item) => item.agentId === agentId)
       if (!agent) throw new Error("Agent is no longer available")
-      const result = await api<{ authorizeUrl: string }>(`/oauth/start?callback=${encodeURIComponent(callback)}&agentId=${encodeURIComponent(agentId)}&scenarios=showcase,consult,open_question,bug&rejoin=${agent.connectionStatus.toLowerCase() === "active"}`)
+      const result = await api<{ authorizeUrl: string }>(`/oauth/start?callback=${encodeURIComponent(callback)}&agentId=${encodeURIComponent(agentId)}&rejoin=${agent.connectionStatus.toLowerCase() === "active"}`)
       window.location.assign(result.authorizeUrl)
     } catch {
       // save() owns the visible error.
@@ -257,7 +259,10 @@ function AgentCard({ agent, customRelay, outfitsAvailable, busy, onChange, onReb
       </div>}
       {agent.avatarSyncStatus === "failed" && <p className="rounded-lg border border-destructive-a20 bg-destructive-a10 p-2 text-xs text-destructive">Avatar sync failed: {agent.avatarSyncReason ?? "unexpected_error"}.</p>}
       <SettingRow label="Avatar source" hint="Outfit is shared only when explicitly selected for this Agent."><div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2"><Button size="sm" variant={agent.avatarSource === "agent-avatar" ? "default" : "outline"} onClick={() => set("avatarSource", "agent-avatar")}>Agent avatar</Button>{outfitsAvailable && <Button size="sm" variant={agent.avatarSource === "outfit" ? "default" : "outline"} onClick={() => set("avatarSource", "outfit")}>Current outfit</Button>}</div></SettingRow>
-      <div className="divide-y divide-overlay-6">{["showcase", "consult", "open_question", "bug"].map((scenario) => <SettingRow key={scenario} label={scenario.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase())}><Switch checked={agent.scenarioToggles[scenario] ?? true} onCheckedChange={(checked) => set("scenarioToggles", { ...agent.scenarioToggles, [scenario]: checked })} /></SettingRow>)}</div>
+      <div className="divide-y divide-overlay-6">
+        <SettingRow label="Answers when spoken to" hint="Replies when someone on Discord mentions it, names it or replies to it."><Switch aria-label={`Answers when spoken to for ${agent.agentName}`} checked={agent.answersWhenSpokenTo} onCheckedChange={(checked) => set("answersWhenSpokenTo", checked)} /></SettingRow>
+        <SettingRow label="Starts conversations on its own" hint="Posts or joins in without being asked. Posts you ask it for go out either way."><Switch aria-label={`Starts conversations on its own for ${agent.agentName}`} checked={agent.startsConversations} onCheckedChange={(checked) => set("startsConversations", checked)} /></SettingRow>
+      </div>
       <details className="rounded-lg border border-overlay-6 bg-overlay-2" open={agent.restrictedMode || undefined}>
         <summary className="cursor-pointer select-none px-3 py-2 text-xs font-medium text-text-muted">Advanced Agent settings</summary>
         <div className="space-y-3 border-t border-overlay-6 p-3">
