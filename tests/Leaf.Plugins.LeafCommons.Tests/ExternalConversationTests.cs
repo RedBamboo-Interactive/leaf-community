@@ -541,7 +541,7 @@ public sealed partial class ExternalConversationTests : IDisposable
         var agent = await state.SavePublicAgentAsync(new(null, AgentId, "Nova", true,
             credential, "active", null,
             new Dictionary<string, bool> { ["showcase"] = true, ["consult"] = true }, [],
-            RestrictedMode: restrictedMode));
+            EnvoyId: "envoy-own", RestrictedMode: restrictedMode));
         var relay = new MultiAgentRelayHandler("Lynial", rejectFirstPost);
         var provider = new FakeExternalProvider();
         var digest = new CommonsDigestSink(state, new DigestFormatter(), state);
@@ -573,6 +573,62 @@ public sealed partial class ExternalConversationTests : IDisposable
             new ExternalConversationCursor("epoch-1", sequence), $"message-{sequence}",
             role, kind, content, DateTimeOffset.UtcNow,
             new JsonObject { ["phase"] = kind == "text" ? "final" : "commentary" });
+
+    [Fact]
+    public async Task A_ping_carries_what_was_said_in_the_thread_since_the_Agent_last_looked()
+    {
+        // Sibylle, 2026-10-29: "je ne lis pas tout le thread". Being addressed decides when the
+        // Agent speaks, not what it can read.
+        var fixture = await CreateAsync();
+        var start = DateTimeOffset.Parse("2026-10-29T18:00:00Z");
+        for (var index = 0; index < 120; index++)
+            fixture.Relay.ThreadMessages.Add(Human($"old-{index}", start.AddSeconds(index), "Bob", $"filler {index}"));
+        fixture.Relay.ThreadMessages.Add(Human("h-1", start.AddMinutes(5), "Bob", "The build fails on step 3."));
+        fixture.Relay.ThreadMessages.Add(Human("h-2", start.AddMinutes(6), "Lynial", "Can you look at this?"));
+
+        await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-1", "Can you look at this?"));
+
+        var first = fixture.Provider.Inputs[^1];
+        Assert.Contains("Bob: The build fails on step 3.", first.Content, StringComparison.Ordinal);
+        Assert.EndsWith("[The message addressed to you]\nCan you look at this?", first.Content, StringComparison.Ordinal);
+        Assert.Equal(1, first.Content.Split("Can you look at this?").Length - 1);
+        Assert.Equal(PublicAgentConversationCoordinator.ThreadContextMessages,
+            first.Metadata!["thread_context_messages"]!.GetValue<int>());
+
+        fixture.Relay.ThreadMessages.Add(Envoy("e-1", start.AddMinutes(7), "Nova · Lynial", fixture.Agent.EnvoyId, "Looking."));
+        fixture.Relay.ThreadMessages.Add(Human("h-3", start.AddMinutes(8), "Bob", "It also fails on step 4."));
+        fixture.Relay.ThreadMessages.Add(Human("h-4", start.AddMinutes(9), "Lynial", "And now?"));
+
+        await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-2", "And now?"));
+
+        var second = fixture.Provider.Inputs[^1].Content;
+        Assert.Contains("Bob: It also fails on step 4.", second, StringComparison.Ordinal);
+        Assert.DoesNotContain("step 3", second, StringComparison.Ordinal);
+        Assert.DoesNotContain("Looking.", second, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Thread_context_without_anything_new_is_the_ping_alone()
+    {
+        var seen = DateTimeOffset.Parse("2026-10-29T18:00:00Z");
+        var context = PublicAgentConversationCoordinator.BuildThreadContext(
+            [new("h-1", seen, new("human", "Bob"), "Hi"), new("h-2", seen.AddMinutes(1), new("human", "Bob"), "Ping")],
+            seen, null, "Ping");
+
+        Assert.Equal(("Ping", 0, (DateTimeOffset?)seen.AddMinutes(1)), (context.Content, context.Count, context.SeenAt));
+    }
+
+    private static object Human(string id, DateTimeOffset at, string name, string text) => new
+    {
+        id, createdAt = at.ToUnixTimeMilliseconds(), content = text, scenario = "consult",
+        actor = new { kind = "human", discordUserId = "u-" + name, displayName = name },
+    };
+
+    private static object Envoy(string id, DateTimeOffset at, string persona, string? envoyId, string text) => new
+    {
+        id, createdAt = at.ToUnixTimeMilliseconds(), content = text, scenario = "consult_reply",
+        actor = new { kind = "envoy", envoyId, personaName = persona },
+    };
 
     [Fact]
     public async Task Outbound_review_provenance_names_the_owner_when_they_resolve_to_a_user()

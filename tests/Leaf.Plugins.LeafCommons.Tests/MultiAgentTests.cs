@@ -301,6 +301,8 @@ internal sealed class MultiAgentRelayHandler(
     /// <summary>Image parts of multipart posts, by request index: (part name, media type, bytes).</summary>
     public Dictionary<int, List<(string Name, string? MediaType, byte[] Bytes)>> Files { get; } = [];
     private int postCount;
+    /// <summary>Thread history served oldest first, 100 per page, like the relay.</summary>
+    public List<object> ThreadMessages { get; } = [];
 
     protected override async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request, CancellationToken cancellationToken)
@@ -336,6 +338,15 @@ internal sealed class MultiAgentRelayHandler(
             payload = rejectFirstPost is not null && postCount == 1
                 ? new { decision = "rejected", reason = rejectFirstPost }
                 : (object)new { decision = "posted", messageId = "message-1", threadId = "thread-1" };
+        }
+        else if (request.RequestUri.AbsolutePath.StartsWith("/v1/threads/", StringComparison.Ordinal)
+                 && request.RequestUri.AbsolutePath.EndsWith("/messages", StringComparison.Ordinal))
+        {
+            var query = System.Web.HttpUtility.ParseQueryString(request.RequestUri.Query);
+            var offset = int.TryParse(query["cursor"], out var cursor) ? cursor : 0;
+            var page = ThreadMessages.Skip(offset).Take(100).ToArray();
+            var next = offset + page.Length;
+            payload = new { messages = page, nextCursor = next < ThreadMessages.Count ? next.ToString() : null };
         }
         else payload = new { ok = true };
         return new HttpResponseMessage(HttpStatusCode.OK)

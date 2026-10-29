@@ -28,6 +28,10 @@ public sealed record CommonsExternalConversation(
     /// <summary>Outbound verdicts the session has not heard about yet (at most five).</summary>
     public JsonArray? OutboundReviews { get; init; }
 
+    /// <summary>The newest thread message the session has been shown, so the next ping carries
+    /// only what was said since.</summary>
+    public DateTimeOffset? ThreadSeenAt { get; init; }
+
     /// <summary>The reply waiting for an unavailable Sentinel, how many times it was asked, and
     /// when to ask again. Persisted so a restart neither resets the count nor asks early.</summary>
     public string? ReviewWaitUid { get; init; }
@@ -89,6 +93,7 @@ public sealed class CommonsExternalConversationStore(IEntityStore entities)
             ["review_attempts"] = (long)value.ReviewAttempts,
             ["review_next_at"] = value.ReviewNextAt?.ToString("O"),
             ["quality_mode"] = value.QualityMode,
+            ["thread_seen_at"] = value.ThreadSeenAt?.ToString("O"),
             ["updated_at"] = now.ToString("O"),
         };
         var saved = await entities.UpsertBySlugAsync(TypeSlug,
@@ -126,6 +131,7 @@ public sealed class CommonsExternalConversationStore(IEntityStore entities)
             ReviewAttempts = (int)Number(data, "review_attempts", 0),
             ReviewNextAt = DateTimeOffset.TryParse(Text(data, "review_next_at"), out var nextAt) ? nextAt : null,
             QualityMode = Text(data, "quality_mode"),
+            ThreadSeenAt = DateTimeOffset.TryParse(Text(data, "thread_seen_at"), out var seenAt) ? seenAt : null,
         };
     }
 
@@ -358,8 +364,12 @@ public sealed class PublicAgentConversationCoordinator(
                 ["outbound_sentinel_reviews"] = record.OutboundReviews?.DeepClone(),
             };
             if (images.Omitted > 0) metadata["omitted_attachments"] = images.Omitted;
+            // Being addressed decides when the Agent speaks, not what it can read: the ping carries
+            // what was said in the thread since it last looked, inside the same reviewed input.
+            var thread = await ThreadContextAsync(agent, record, request, ct);
+            if (thread.Count > 0) metadata["thread_context_messages"] = thread.Count;
             var admission = await provider.SendAsync(handle, new ExternalConversationInput(
-                requestId, requestor, request.Content, images.Attachments, metadata), ct);
+                requestId, requestor, thread.Content, images.Attachments, metadata), ct);
             if (admission.Disposition == ExternalConversationDispositions.RefusedSentinelUnavailable)
             {
                 // Fail closed (Laurent, 2026-10-23): no Sentinel verdict, no session. Leaf
@@ -371,8 +381,12 @@ public sealed class PublicAgentConversationCoordinator(
                     fallback: SentinelUnavailableNotice);
                 return await FailedAsync(agent, request, "sentinel_unavailable", ct);
             }
-            if (record.OutboundReviews is { Count: > 0 })
-                record = await conversations.SaveAsync(record with { OutboundReviews = null }, ct);
+            if (record.OutboundReviews is { Count: > 0 } || thread.SeenAt != record.ThreadSeenAt)
+                record = await conversations.SaveAsync(record with
+                {
+                    OutboundReviews = null,
+                    ThreadSeenAt = thread.SeenAt,
+                }, ct);
             await audit.RecordAsync("external_conversation_admitted", Metadata(agent.AgentEntityId,
                 ("thread", request.ThreadRef), ("scenario", request.Kind),
                 ("binding_id", record.BindingId), ("session_id", handle.SessionId),
@@ -393,6 +407,72 @@ public sealed class PublicAgentConversationCoordinator(
         {
             gate.Release();
         }
+    }
+
+    internal const int ThreadContextMessages = 30;
+    internal const int ThreadContextCharacters = 8_000;
+
+    internal sealed record ThreadContext(string Content, int Count, DateTimeOffset? SeenAt);
+
+    /// <summary>
+    /// The ping, preceded by the thread messages the session has not seen: newest last, without
+    /// the Agent's own posts or the ping itself, bounded in count and size. A relay that cannot
+    /// serve history leaves the ping as it is; it never blocks the answer.
+    /// </summary>
+    private async Task<ThreadContext> ThreadContextAsync(PublicAgentSettings agent,
+        CommonsExternalConversation record, EnvoyRunRequest request, CancellationToken ct)
+    {
+        IReadOnlyList<RelayThreadMessage> messages;
+        try
+        {
+            messages = await relays.For(agent.AgentEntityId).GetThreadMessagesAsync(record.ThreadRef, ct);
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            logger.LogWarning(error, "Leaf Community thread history for {ThreadRef} is unavailable",
+                record.ThreadRef);
+            return new(request.Content, 0, record.ThreadSeenAt);
+        }
+        return BuildThreadContext(messages, record.ThreadSeenAt, agent.EnvoyId, request.Content);
+    }
+
+    internal static ThreadContext BuildThreadContext(IReadOnlyList<RelayThreadMessage> messages,
+        DateTimeOffset? seenAt, string? ownEnvoyId, string ping)
+    {
+        var newest = messages.Count == 0 ? seenAt : messages.Max(message => message.At);
+        if (seenAt is { } seen && newest < seen) newest = seen;
+        var unseen = messages
+            .Where(message => seenAt is null || message.At > seenAt)
+            .Where(message => ownEnvoyId is null || message.Author.EnvoyId != ownEnvoyId)
+            .OrderBy(message => message.At)
+            .ToList();
+        // The ping is already in the thread as its newest human message; drop that one copy.
+        var pingIndex = unseen.FindLastIndex(message => message.Author.Kind == "human"
+            && string.Equals(message.Text.Trim(), ping.Trim(), StringComparison.Ordinal));
+        if (pingIndex >= 0) unseen.RemoveAt(pingIndex);
+
+        var lines = new List<string>();
+        var size = 0;
+        foreach (var message in Enumerable.Reverse(unseen).Take(ThreadContextMessages))
+        {
+            var text = message.Images is { Count: > 0 } images
+                ? string.Join("\n", new[] { message.Text }
+                    .Concat(images.Select(image => $"[image: {image.Filename}]"))
+                    .Where(line => line.Length > 0))
+                : message.Text;
+            var line = $"{message.Author.Name}: {text}";
+            if (size + line.Length > ThreadContextCharacters) break;
+            lines.Add(line);
+            size += line.Length;
+        }
+        if (lines.Count == 0) return new(ping, 0, newest);
+        lines.Reverse();
+        var skipped = unseen.Count - lines.Count;
+        var header = skipped > 0
+            ? $"[Said in this thread since you last looked; {skipped} older message(s) not shown]"
+            : "[Said in this thread since you last looked]";
+        return new($"{header}\n{string.Join("\n\n", lines)}\n\n[The message addressed to you]\n{ping}",
+            lines.Count, newest);
     }
 
     public async Task<string?> SessionIdAsync(

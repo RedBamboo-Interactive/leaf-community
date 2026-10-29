@@ -241,15 +241,31 @@ public sealed class RelayHttpClient(
     public async Task<IReadOnlyList<RelayThreadMessage>> GetThreadMessagesAsync(
         string threadRef, CancellationToken ct = default)
     {
-        var path = "/v1/threads/" + Uri.EscapeDataString(threadRef) + "/messages?limit=100";
-        using var response = await SendAsync(HttpMethod.Get, path, null, ct);
-        if (response.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.NotImplemented)
-            throw new RelayFeatureUnavailableException("thread-messages");
-        using var json = await ReadJsonAsync(response, ct);
-        if (!response.IsSuccessStatusCode) throw RelayError(response, json.RootElement, "thread_messages_failed");
+        // The relay pages oldest first and keeps at most 500 messages, so the newest are on the
+        // last page: follow the cursor to the end.
         var list = new List<RelayThreadMessage>();
-        if (!json.RootElement.TryGetProperty("messages", out var messages)
-            || messages.ValueKind != JsonValueKind.Array) return list;
+        string? cursor = null;
+        for (var page = 0; page < 10; page++)
+        {
+            var path = "/v1/threads/" + Uri.EscapeDataString(threadRef) + "/messages?limit=100"
+                + (cursor is null ? "" : "&cursor=" + Uri.EscapeDataString(cursor));
+            using var response = await SendAsync(HttpMethod.Get, path, null, ct);
+            if (response.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.NotImplemented)
+                throw new RelayFeatureUnavailableException("thread-messages");
+            using var json = await ReadJsonAsync(response, ct);
+            if (!response.IsSuccessStatusCode) throw RelayError(response, json.RootElement, "thread_messages_failed");
+            if (!json.RootElement.TryGetProperty("messages", out var messages)
+                || messages.ValueKind != JsonValueKind.Array) return list;
+            AddThreadMessages(list, messages);
+            cursor = json.RootElement.TryGetProperty("nextCursor", out var next)
+                && next.ValueKind == JsonValueKind.String ? next.GetString() : null;
+            if (string.IsNullOrEmpty(cursor)) break;
+        }
+        return list;
+    }
+
+    private static void AddThreadMessages(List<RelayThreadMessage> list, JsonElement messages)
+    {
         foreach (var item in messages.EnumerateArray())
         {
             var actor = item.GetProperty("actor");
@@ -263,7 +279,6 @@ public sealed class RelayHttpClient(
                 String(item, "scenario"),
                 ConnectorCore.ParseImages(item).Images is { Count: > 0 } images ? images : null));
         }
-        return list;
     }
 
     public Task<RelayPostResult> PostAsync(string threadRef, string content, IReadOnlyList<string>? addresses = null, string? idempotencyKey = null, CancellationToken ct = default)
