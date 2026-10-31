@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Leaf.Sdk;
 using Leaf.Sdk.Services;
 using Microsoft.AspNetCore.Http;
@@ -108,7 +109,42 @@ public sealed class CommonsOutboundReview(
     /// A fixed notice that needs no review: exactly one of the notices. Any prefix or suffix could
     /// be model-written and is reviewed. The relay adds a chain reply's "Replying to" line itself.
     /// </summary>
-    public static bool IsFixedNotice(string content) => FixedNotices.Contains(content);
+    public static bool IsFixedNotice(string content)
+        => FixedNotices.Contains(content) || UndeliveredNoticePattern.IsMatch(content);
+
+    /// <summary>
+    /// The notice for an addressed reply that was written but not posted, with a code the
+    /// participant can report and the Agent can read back in thread history. The code is always
+    /// <see cref="PublicErrorCode"/> output, never model text.
+    /// </summary>
+    public static string UndeliveredNotice(string? reason)
+        => $"I wrote a reply but couldn't post it here (error code: {PublicErrorCode(reason)}).";
+
+    /// <summary>
+    /// The public form of a delivery failure. The owner's private words, canaries and detected
+    /// secrets all read as <c>private_content</c>, so the thread never learns which one tripped
+    /// (a canary's alarm stays the owner's); the exact rule goes in the owner notice. Relay and
+    /// local failure codes pass through reduced to lowercase letters, digits and underscores.
+    /// </summary>
+    public static string PublicErrorCode(string? reason)
+    {
+        if (reason is "canary" or "personal-word" || reason?.StartsWith("secret:", StringComparison.Ordinal) == true)
+            return "private_content";
+        var code = reason switch
+        {
+            "user-profile-path" or "absolute-path" => "local_path",
+            "content-too-long" => "reply_too_long",
+            "empty" => "empty_reply",
+            _ => Regex.Replace((reason ?? "").ToLowerInvariant(), "[^a-z0-9_]", "_").Trim('_'),
+        };
+        return code.Length == 0 ? "unknown" : code.Length <= MaxErrorCodeLength ? code : code[..MaxErrorCodeLength];
+    }
+
+    internal const int MaxErrorCodeLength = 40;
+
+    private static readonly Regex UndeliveredNoticePattern = new(
+        @"\AI wrote a reply but couldn't post it here \(error code: [a-z0-9_]{1,40}\)\.\z",
+        RegexOptions.CultureInvariant);
 
     public const string WithheldNotice =
         "I wrote a reply here but withheld it because it could have shared private information.";

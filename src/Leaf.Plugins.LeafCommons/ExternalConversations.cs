@@ -856,7 +856,9 @@ public sealed class PublicAgentConversationCoordinator(
         string? fallback = null)
     {
         if (!request.Addressed || string.IsNullOrWhiteSpace(request.ThreadRef)) return;
-        var content = fallback ?? EnvoyRunner.CoverageFallback;
+        // Without a specific notice, the participant learns the reply exists and why it is not
+        // here, as a code someone can work from (Merendar's #bug-reports ping, 2026-10-31).
+        var content = fallback ?? CommonsOutboundReview.UndeliveredNotice(reason);
         var decision = filter.Check(content, owner.PersonalWords, owner.Canaries);
         if (!decision.Allowed) return;
         var posted = await relays.For(agent.AgentEntityId).PostAsync(request.ThreadRef,

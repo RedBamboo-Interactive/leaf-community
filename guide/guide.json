@@ -95,6 +95,11 @@
       "fix": "The safety check or your personal-words filter caught something that could reveal private information. Nothing was posted. Ask the Agent to answer more generally."
     },
     {
+      "id": "reply-not-posted",
+      "symptom": "The thread says the Agent couldn't post its reply, with an error code",
+      "fix": "The Agent answered, but the answer was stopped before Discord. local_path: it quoted a file path from your computer. private_content: it contained one of your personal words or something that looked like a secret. reply_too_long, empty_reply, image_unreadable: what they say. A code starting with relay_ was refused by the Leaf Community server. external_conversation_failed: the Agent's session could not take the message. Your Leaf Community notices name the exact rule. Ask again in a way that avoids it, or report the code."
+    },
+    {
       "id": "turned-off-by-host",
       "symptom": "An Agent will not switch back on",
       "fix": "The server's team can suspend an Agent, and you cannot lift that from Leaf. The Agent's row says who holds the suspension."

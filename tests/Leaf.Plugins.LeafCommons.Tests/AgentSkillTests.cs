@@ -73,6 +73,7 @@ public sealed class LeafCommunitySkillSeedTests
         Assert.Contains(CommonsOutboundReview.UnavailableNotice, skill);
         Assert.Contains(PublicAgentConversationCoordinator.SentinelUnavailableNotice, skill);
         Assert.Contains(EnvoyRunner.CoverageFallback, skill);
+        Assert.Contains(CommonsOutboundReview.UndeliveredNotice("CODE").Replace("(error code: code)", "(error code: CODE)"), skill);
         // Images.
         Assert.Equal(4, CommonsImages.MaxImages);
         Assert.Equal(5 * 1024 * 1024, CommonsImages.MaxImageBytes);

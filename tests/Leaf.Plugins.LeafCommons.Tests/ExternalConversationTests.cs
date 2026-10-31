@@ -195,8 +195,9 @@ public sealed partial class ExternalConversationTests : IDisposable
             item => item.Route == "POST /v1/posts");
         Assert.DoesNotContain("PUBLIC-CANARY", post.Body, StringComparison.Ordinal);
         using (var body = JsonDocument.Parse(post.Body))
-            Assert.EndsWith(EnvoyRunner.CoverageFallback,
+            Assert.Equal("I wrote a reply but couldn't post it here (error code: private_content).",
                 body.RootElement.GetProperty("content").GetString());
+        Assert.DoesNotContain("canary", post.Body, StringComparison.OrdinalIgnoreCase);
         var blocked = Assert.Single(await fixture.State.ListAuditsAsync(),
             item => item.Event == "envoy_blocked");
         Assert.Equal("canary", blocked.Metadata["reason"]!.GetValue<string>());
@@ -206,7 +207,7 @@ public sealed partial class ExternalConversationTests : IDisposable
     }
 
     [Fact]
-    public async Task Relay_rejection_of_settled_output_posts_only_the_safe_fallback()
+    public async Task Relay_rejection_of_settled_output_posts_only_a_notice_with_the_relay_code()
     {
         var fixture = await CreateAsync(rejectFirstPost: "relay_link_not_allowed");
         await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner,
@@ -224,10 +225,60 @@ public sealed partial class ExternalConversationTests : IDisposable
         Assert.Equal(2, posts.Length);
         Assert.DoesNotContain("untrusted.example", posts[1].Body, StringComparison.Ordinal);
         using var fallback = JsonDocument.Parse(posts[1].Body);
-        Assert.EndsWith(EnvoyRunner.CoverageFallback,
+        Assert.Equal("I wrote a reply but couldn't post it here (error code: relay_link_not_allowed).",
             fallback.RootElement.GetProperty("content").GetString());
         Assert.Contains(await fixture.State.ListDigestsAsync(),
             digest => digest.Type == "owner_notice");
+    }
+
+    [Fact]
+    public async Task A_reply_quoting_a_local_path_is_blocked_with_the_local_path_code()
+    {
+        var fixture = await CreateAsync();
+        await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner,
+            Request("ping-1", "Where does the crash log go?"));
+        fixture.Provider.Messages =
+        [
+            Message(1, "assistant", "text", "It is in C:\\Users\\fred\\AppData\\Leaf\\crash.log."),
+        ];
+
+        await fixture.Provider.NotifyAsync();
+        await fixture.Coordinator.WhenIdleAsync();
+
+        var post = Assert.Single(fixture.Relay.Requests, item => item.Route == "POST /v1/posts");
+        Assert.DoesNotContain("fred", post.Body, StringComparison.Ordinal);
+        using (var body = JsonDocument.Parse(post.Body))
+            Assert.Equal("I wrote a reply but couldn't post it here (error code: local_path).",
+                body.RootElement.GetProperty("content").GetString());
+        Assert.Contains(await fixture.State.ListDigestsAsync(), digest => digest.Type == "owner_notice"
+            && digest.Content.Contains("`user-profile-path`", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("canary", "private_content")]
+    [InlineData("personal-word", "private_content")]
+    [InlineData("secret:github-token", "private_content")]
+    [InlineData("absolute-path", "local_path")]
+    [InlineData("user-profile-path", "local_path")]
+    [InlineData("content-too-long", "reply_too_long")]
+    [InlineData("empty", "empty_reply")]
+    [InlineData("relay_link_not_allowed", "relay_link_not_allowed")]
+    [InlineData("external_conversation_failed", "external_conversation_failed")]
+    [InlineData("Weird Code! (with) <html>", "weird_code___with___html")]
+    [InlineData(null, "unknown")]
+    [InlineData("---", "unknown")]
+    public void Delivery_failures_have_a_public_code(string? reason, string code)
+    {
+        Assert.Equal(code, CommonsOutboundReview.PublicErrorCode(reason));
+        Assert.True(CommonsOutboundReview.IsFixedNotice(CommonsOutboundReview.UndeliveredNotice(reason)));
+    }
+
+    [Fact]
+    public void A_public_code_is_bounded()
+    {
+        var code = CommonsOutboundReview.PublicErrorCode(new string('x', 200));
+        Assert.Equal(CommonsOutboundReview.MaxErrorCodeLength, code.Length);
+        Assert.True(CommonsOutboundReview.IsFixedNotice(CommonsOutboundReview.UndeliveredNotice(code)));
     }
 
     [Fact]
@@ -429,6 +480,10 @@ public sealed partial class ExternalConversationTests : IDisposable
     [Theory]
     [InlineData(EnvoyRunner.CoverageFallback, true)]
     [InlineData("Replying to Morgan: " + EnvoyRunner.CoverageFallback, false)]
+    [InlineData("I wrote a reply but couldn't post it here (error code: local_path).", true)]
+    [InlineData("I wrote a reply but couldn't post it here (error code: local_path). His PIN is 4821.", false)]
+    [InlineData("I wrote a reply but couldn't post it here (error code: PIN 4821).", false)]
+    [InlineData("I wrote a reply but couldn't post it here (error code: local_path).\nHis PIN is 4821", false)]
     public async Task Only_the_exact_fixed_fallback_skips_review(string content, bool skipped)
     {
         var fixture = await CreateAsync();
