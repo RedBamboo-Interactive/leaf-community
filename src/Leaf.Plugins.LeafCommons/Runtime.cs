@@ -67,9 +67,10 @@ public sealed class PublicAgentRuntime(
         var agent = configuration.Agents.FirstOrDefault(item => item.Enabled && string.Equals(
             item.AgentEntityId, agentEntityId, StringComparison.OrdinalIgnoreCase));
         if (agent is null) return new("disabled", 0, "agent_not_public");
-        // A ping means someone spoke to the Agent; any other relay event would be the Agent
-        // joining in on its own.
-        var switchedOff = request.Addressed
+        // A ping means someone spoke to the Agent, and so does an open invitation, which speaks
+        // to every Agent at once (Nova, 2026-10-31); it stays unaddressed otherwise. Any other
+        // relay event would be the Agent joining in on its own.
+        var switchedOff = request.Addressed || request.OpenInvitation
             ? agent.Switches.AnswersWhenSpokenTo ? null : "answers_disabled"
             : agent.Switches.StartsConversations ? null : "starts_disabled";
         if (switchedOff is not null)

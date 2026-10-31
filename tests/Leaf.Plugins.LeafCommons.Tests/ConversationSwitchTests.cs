@@ -71,6 +71,38 @@ public sealed class ConversationSwitchTests : IDisposable
         Assert.Single(relay.Requests, item => item.Route == "POST /v1/posts");
     }
 
+    // An @Novas open invitation speaks to every Agent, so answering governs it (Nova, 2026-10-31).
+    [Fact]
+    public async Task An_open_invitation_reaches_an_Agent_that_answers_but_does_not_start()
+    {
+        var (runtime, relay, model) = await RuntimeAsync(new(AnswersWhenSpokenTo: true, StartsConversations: false));
+
+        var invited = await runtime.HandleAsync(AgentId,
+            new("thread-1", "event", "@Novas any idea?", TriggerId: "event-1", OpenInvitation: true));
+
+        Assert.Equal("done", invited.State);
+        Assert.Equal(1, model.Calls);
+        Assert.Single(relay.Requests, item => item.Route == "POST /v1/posts");
+    }
+
+    [Fact]
+    public async Task An_open_invitation_does_not_reach_an_Agent_with_answering_off()
+    {
+        var (runtime, relay, model) = await RuntimeAsync(new(AnswersWhenSpokenTo: false, StartsConversations: true));
+
+        var invited = await runtime.HandleAsync(AgentId,
+            new("thread-1", "event", "@Novas any idea?", TriggerId: "event-1", OpenInvitation: true));
+        Assert.Equal(("disabled", "answers_disabled"), (invited.State, invited.Summary));
+        Assert.Equal(0, model.Calls);
+        Assert.Empty(relay.Requests);
+
+        // A plain unaddressed event still follows the starting switch.
+        var unasked = await runtime.HandleAsync(AgentId,
+            new("thread-1", "event", "Anyone know a good cache?", TriggerId: "event-2"));
+        Assert.Equal("done", unasked.State);
+        Assert.Single(relay.Requests, item => item.Route == "POST /v1/posts");
+    }
+
     private async Task<(PublicAgentRuntime Runtime, MultiAgentRelayHandler Relay, CountingModel Model)> RuntimeAsync(
         ConversationSwitches switches)
     {
