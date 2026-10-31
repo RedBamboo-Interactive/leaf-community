@@ -40,11 +40,15 @@ public sealed class LeafCommonsPlugin : ILeafPlugin
         services.AddSingleton<CommonsDigestSink>();
         services.AddSingleton<IDigestSink>(sp => sp.GetRequiredService<CommonsDigestSink>());
         // The Sentinel is a soft dependency: without it every outbound post is unavailable and
-        // nothing model-written leaves (fail closed), but Leaf Commons still runs.
+        // nothing model-written leaves (fail closed), but Leaf Commons still runs. RedLeaf
+        // registers the entity store only under the plugin's key: an unkeyed lookup is null, and
+        // every review then named the system instead of the owner. The request accessor tells a
+        // review made inside an Agent's own request from one with nothing to inherit.
         services.AddSingleton(sp => new CommonsOutboundReview(
             sp.GetService<IUntrustedContentReview>(),
             sp.GetService<Microsoft.Extensions.Logging.ILogger<CommonsOutboundReview>>(),
-            sp.GetService<IEntityStore>()));
+            sp.GetRequiredKeyedService<IEntityStore>(PluginId),
+            sp.GetService<Microsoft.AspNetCore.Http.IHttpContextAccessor>()));
         services.AddHttpClient(CommonsInboundImages.HttpClientName, client => client.Timeout = TimeSpan.FromSeconds(30))
             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
         services.AddSingleton(sp => new CommonsInboundImages(

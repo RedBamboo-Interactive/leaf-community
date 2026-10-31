@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using System.Text.Json.Nodes;
 using Leaf.Sdk;
 using Leaf.Sdk.Services;
@@ -15,10 +16,38 @@ internal static class CommonsComputeProvenance
 {
     public const string ReviewRoute = "/api/apps/leaf-commons/outbound-review";
 
-    public static async Task<ComputeProvenance> CreateAsync(
+    /// <summary>
+    /// The provenance for a review made while <paramref name="caller"/> is the authenticated
+    /// request, or null when the review inherits the caller's own execution identity. RedLeaf's
+    /// ComputeGateway signs a stated provenance only for a beneficiary that request may act for:
+    /// an execution bearer is the review's parent, so the review inherits it (as RedLeaf does for
+    /// any call without a provenance) instead of naming anyone; LocalDefault, system and service
+    /// callers act only for the system; a signed-in user only for themself. Any other stated
+    /// beneficiary is refused as "beneficiary does not match the authenticated caller": the
+    /// system inside the owner's own Agent request failed every brief (field report, 2026-10-31).
+    /// Without a request the review states its own provenance for the owner.
+    /// </summary>
+    public static async Task<ComputeProvenance?> ForCallerAsync(
+        ClaimsPrincipal? caller,
         IEntityStore? entities,
         string agentRef,
         string? ownerUserId,
+        IReadOnlyList<ComputeContextReference> context,
+        string? correlationId,
+        CancellationToken ct)
+    {
+        if (caller?.Identity?.IsAuthenticated != true)
+            return await CreateAsync(entities, agentRef, await BeneficiaryAsync(entities, ownerUserId, ct),
+                context, correlationId, ct);
+        if (string.Equals(caller.FindFirst("token_use")?.Value, "execution", StringComparison.OrdinalIgnoreCase))
+            return null;
+        return await CreateAsync(entities, agentRef, CallerBeneficiary(caller), context, correlationId, ct);
+    }
+
+    public static async Task<ComputeProvenance> CreateAsync(
+        IEntityStore? entities,
+        string agentRef,
+        ComputeBeneficiary beneficiary,
         IReadOnlyList<ComputeContextReference> context,
         string? correlationId,
         CancellationToken ct)
@@ -40,7 +69,7 @@ internal static class CommonsComputeProvenance
             ComputeProvenance.CurrentSchemaVersion,
             new ComputeOrigin("redleaf", app, new ComputeEntrypoint("background", ReviewRoute, "REVIEW")),
             actor,
-            await BeneficiaryAsync(entities, ownerUserId, ct),
+            beneficiary,
             context.Take(15).ToArray(),
             new ComputeTrace(CorrelationId: correlationId),
             ComputeProvenanceAssurance.Verified,
@@ -60,6 +89,24 @@ internal static class CommonsComputeProvenance
                 Str(user.Data, "avatar_url") ?? Str(user.Data, "avatar"));
         return new ComputeBeneficiary("system",
             Reason: "Leaf Community review for an owner without a resolvable User");
+    }
+
+    /// <summary>
+    /// The one beneficiary RedLeaf lets an authenticated request without an execution identity
+    /// name: the signed-in user themself, or the system for LocalDefault, system and service
+    /// callers (a bearer merely named local-user stays refused by RedLeaf).
+    /// </summary>
+    internal static ComputeBeneficiary CallerBeneficiary(ClaimsPrincipal caller)
+    {
+        var subject = caller.FindFirst("sub")?.Value;
+        return caller.Identity?.AuthenticationType != "LocalDefault"
+               && !string.IsNullOrWhiteSpace(subject)
+               && subject is not ("local-user" or "system")
+               && !subject.StartsWith("service:", StringComparison.OrdinalIgnoreCase)
+            ? new ComputeBeneficiary("user", subject, caller.FindFirst("name")?.Value,
+                caller.FindFirst("picture")?.Value)
+            : new ComputeBeneficiary("system",
+                Reason: "Leaf Community review requested by a local, system or service caller");
     }
 
     private static string? Str(JsonObject data, string key)

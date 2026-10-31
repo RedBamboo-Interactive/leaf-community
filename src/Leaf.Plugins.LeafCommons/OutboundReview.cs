@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Leaf.Sdk;
 using Leaf.Sdk.Services;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 
 namespace Leaf.Plugins.LeafCommons;
@@ -22,7 +23,8 @@ public sealed record CommonsOutboundVerdict(bool Allowed, bool Unavailable, Json
 public sealed class CommonsOutboundReview(
     IUntrustedContentReview? sentinel = null,
     ILogger<CommonsOutboundReview>? logger = null,
-    IEntityStore? entities = null)
+    IEntityStore? entities = null,
+    IHttpContextAccessor? requests = null)
 {
     public const string Audience =
         "a public Discord channel or thread in a Leaf Community server, readable by every member who can see it";
@@ -34,8 +36,9 @@ public sealed class CommonsOutboundReview(
     /// Discord does): the Sentinel reads the Asset bytes and reviews them on a vision model with the
     /// same rubric. A verdict counts only when it echoes the outbound direction and reviewed every
     /// image sent; a reviewer that ignored the images, or could not see them, is unavailable.
-    /// The review states its own provenance for <paramref name="ownerUserId"/>, so it runs with a
-    /// signed execution identity even when no request or execution scope is there to inherit.
+    /// Inside an Agent's own request the review inherits that execution identity; with no request
+    /// to inherit it states its own provenance for <paramref name="ownerUserId"/>
+    /// (<see cref="CommonsComputeProvenance.ForCallerAsync"/>).
     /// </summary>
     public async Task<CommonsOutboundVerdict> ReviewAsync(
         string agentEntityId, string threadRef, string content, string key, CancellationToken ct = default,
@@ -51,7 +54,8 @@ public sealed class CommonsOutboundReview(
                 // No compute: the Sentinel always runs on its configured tier (fast by default) on
                 // the installation's default provider.
                 var reviewKey = key.Length <= 200 ? key : key[..200];
-                var provenance = await CommonsComputeProvenance.CreateAsync(entities, agentEntityId, ownerUserId,
+                var provenance = await CommonsComputeProvenance.ForCallerAsync(requests?.HttpContext?.User,
+                    entities, agentEntityId, ownerUserId,
                     [new ComputeContextReference("external-conversation", threadRef),
                      new ComputeContextReference("outbound-review", reviewKey)],
                     reviewKey, ct);
