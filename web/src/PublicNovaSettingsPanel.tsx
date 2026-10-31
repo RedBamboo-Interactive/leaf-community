@@ -11,7 +11,7 @@ import {
   SettingRow,
   Switch,
 } from "@redbamboo/ui"
-import { agentConnectionLabel, customRelayBadge, isRelaySuspension } from "./agent-row"
+import { agentConnectionLabel, avatarNotice, customRelayBadge, isRelaySuspension } from "./agent-row"
 
 type Settings = {
   relayBaseUrl: string
@@ -239,6 +239,7 @@ function AgentCard({ agent, customRelay, outfitsAvailable, busy, onChange, onReb
     onChange((current) => ({ ...current, [key]: value }))
   const connection = agentConnectionLabel(agent.enabled, agent.credentialConfigured, agent.connectionStatus, agent.suspendedBy)
   const relayBadge = customRelayBadge(customRelay)
+  const avatar = avatarNotice(agent.avatarSyncStatus, agent.avatarSyncReason)
   return <div className="rounded-xl border border-overlay-6 bg-overlay-2 p-3">
     <div className="flex items-center gap-3">
       {agent.agentAvatarUrl ? <img className="h-10 w-10 rounded-full object-cover" src={agent.agentAvatarUrl} alt="" /> : <div className="grid h-10 w-10 place-items-center rounded-full bg-overlay-6"><i className="ph ph-user" /></div>}
@@ -257,7 +258,7 @@ function AgentCard({ agent, customRelay, outfitsAvailable, busy, onChange, onReb
         <p className="text-xs text-text-muted">Sign in to Discord to connect {agent.persona}.</p>
         <Button size="sm" disabled={busy} onClick={onConnect}>Sign in to Discord…</Button>
       </div>}
-      {agent.avatarSyncStatus === "failed" && <p className="rounded-lg border border-destructive-a20 bg-destructive-a10 p-2 text-xs text-destructive">Avatar sync failed: {agent.avatarSyncReason ?? "unexpected_error"}.</p>}
+      {avatar && <p className={avatar.tone === "error" ? "rounded-lg border border-destructive-a20 bg-destructive-a10 p-2 text-xs text-destructive" : "rounded-lg border border-primary-a20 bg-primary-a10 p-2 text-xs text-text-muted"}>{avatar.text}</p>}
       <SettingRow label="Avatar source" hint="Outfit is shared only when explicitly selected for this Agent."><div className="grid w-full grid-cols-1 gap-2 sm:grid-cols-2"><Button size="sm" variant={agent.avatarSource === "agent-avatar" ? "default" : "outline"} onClick={() => set("avatarSource", "agent-avatar")}>Agent avatar</Button>{outfitsAvailable && <Button size="sm" variant={agent.avatarSource === "outfit" ? "default" : "outline"} onClick={() => set("avatarSource", "outfit")}>Current outfit</Button>}</div></SettingRow>
       <div className="divide-y divide-overlay-6">
         <SettingRow label="Answers when spoken to" hint="Replies when someone on Discord mentions it, names it or replies to it."><Switch aria-label={`Answers when spoken to for ${agent.agentName}`} checked={agent.answersWhenSpokenTo} onCheckedChange={(checked) => set("answersWhenSpokenTo", checked)} /></SettingRow>

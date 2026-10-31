@@ -21,6 +21,15 @@ public static class AvatarSources
             ? "outfit_unavailable"
             : null;
     }
+
+    /// <summary>
+    /// An Outfit marked nsfw, read as Nova's public self-context reads it: <c>true</c> or a string
+    /// <c>bool.TryParse</c> accepts ("true", "True"). Such an outfit is never published as an avatar.
+    /// </summary>
+    public static bool IsNsfw(JsonObject data)
+        => data["nsfw"] is JsonValue value
+           && (value.TryGetValue<bool>(out var flag) ? flag
+               : value.TryGetValue<string>(out var text) && bool.TryParse(text, out var parsed) && parsed);
 }
 
 public sealed class AvatarSyncException(string reason) : Exception(reason)
@@ -28,11 +37,14 @@ public sealed class AvatarSyncException(string reason) : Exception(reason)
     public string Reason { get; } = reason;
 }
 
+/// <param name="FallbackReason">Set when the image is not the selected source's, e.g. <c>outfit_nsfw</c>
+/// when the Agent avatar stands in for an nsfw outfit.</param>
 public sealed record AvatarImage(
     byte[] Bytes,
     string ContentType,
     string? AssetId = null,
-    string? SourceReference = null);
+    string? SourceReference = null,
+    string? FallbackReason = null);
 public sealed record PreparedAvatar(byte[] Bytes, string ContentType, string ContentHash);
 public sealed record AvatarUploadResult(string AvatarKey, string AvatarUrl, string ContentHash, bool Changed);
 public sealed record AvatarSyncResult(bool Uploaded, string ContentHash, string? AvatarUrl = null);
@@ -77,6 +89,17 @@ public sealed class RedLeafAvatarImageSource(IEntityStore entities, IAssets asse
             var owner = String(outfit.Data, "agent");
             if (!string.Equals(owner, agent.Id.ToString(), StringComparison.OrdinalIgnoreCase))
                 throw new AvatarSyncException("outfit_agent_mismatch");
+            // An nsfw outfit is never read, let alone published: the Agent avatar stands in, and
+            // when there is none nothing is uploaded at all.
+            if (AvatarSources.IsNsfw(outfit.Data))
+            {
+                try
+                {
+                    return await ReadAssetAsync(AvatarValue(agent.Data), agent.Id.ToString(), ct) with
+                        { FallbackReason = "outfit_nsfw" };
+                }
+                catch (AvatarSyncException) { throw new AvatarSyncException("outfit_nsfw"); }
+            }
             assetValue = String(outfit.Data, "asset");
             if (string.IsNullOrWhiteSpace(assetValue)) throw new AvatarSyncException("outfit_asset_missing");
             return await ReadAssetAsync(assetValue, outfit.Id.ToString(), ct);
@@ -195,7 +218,7 @@ public sealed class AvatarSyncService(
             var prepared = processor.Prepare(image);
             if (string.Equals(prepared.ContentHash, settings.AvatarContentHash, StringComparison.Ordinal))
             {
-                await SaveOutcomeAsync(settings, "current", null, image.AssetId, ct);
+                await SaveOutcomeAsync(settings, "current", image.FallbackReason, image.AssetId, ct);
                 return new(false, prepared.ContentHash);
             }
             var uploaded = await uploader.UploadAvatarAsync(prepared.Bytes, prepared.ContentType, ct);
@@ -206,7 +229,7 @@ public sealed class AvatarSyncService(
                 Avatar = uploaded.AvatarKey,
                 AvatarContentHash = prepared.ContentHash,
                 AvatarSyncStatus = "synced",
-                AvatarSyncReason = null,
+                AvatarSyncReason = image.FallbackReason,
                 AvatarResolvedAssetId = image.AssetId,
                 AvatarSyncedAt = DateTimeOffset.UtcNow,
             }, ct);
@@ -218,6 +241,7 @@ public sealed class AvatarSyncService(
                 ["asset_id"] = image.AssetId,
                 ["content_hash"] = prepared.ContentHash,
                 ["changed"] = uploaded.Changed,
+                ["fallback_reason"] = image.FallbackReason,
             }, ct);
             return new(true, prepared.ContentHash, uploaded.AvatarUrl);
         }

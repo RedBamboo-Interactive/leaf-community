@@ -30,6 +30,17 @@ export function isRelaySuspension(label: AgentConnectionLabel): boolean {
   return label.startsWith("Suspended")
 }
 
+export type AvatarNotice = { tone: "notice" | "error"; text: string }
+
+/** What the Agent row says about its public avatar, if anything. */
+export function avatarNotice(status: string, reason?: string | null): AvatarNotice | null {
+  if (reason === "outfit_nsfw") return status === "failed"
+    ? { tone: "error", text: "The current outfit is marked nsfw, so it is not shared, and there is no Agent avatar to show instead. Discord keeps the previous avatar." }
+    : { tone: "notice", text: "The current outfit is marked nsfw, so it is not shared. Discord shows the Agent avatar instead." }
+  if (status === "failed") return { tone: "error", text: `Avatar sync failed: ${reason ?? "unexpected_error"}.` }
+  return null
+}
+
 export function customRelayBadge(overrideActive: boolean): string | null {
   return overrideActive ? "Custom relay" : null
 }

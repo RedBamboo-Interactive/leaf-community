@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { agentConnectionLabel, customRelayBadge, isRelaySuspension } from "./agent-row.ts"
+import { agentConnectionLabel, avatarNotice, customRelayBadge, isRelaySuspension } from "./agent-row.ts"
 
 test("projects connector state into person-facing labels", () => {
   assert.equal(agentConnectionLabel(true, true, "active"), "Connected")
@@ -25,6 +25,16 @@ test("the owner's own switch-off is just off", () => {
   assert.equal(agentConnectionLabel(false, true, "suspended", "owner"), "Off")
   assert.equal(agentConnectionLabel(false, true, "suspended", null), "Off")
   assert.equal(isRelaySuspension("Off"), false)
+})
+
+test("an nsfw outfit says why the Agent avatar shows, or why nothing changed", () => {
+  assert.equal(avatarNotice("synced", "outfit_nsfw")?.tone, "notice")
+  assert.equal(avatarNotice("current", "outfit_nsfw")?.tone, "notice")
+  assert.match(avatarNotice("current", "outfit_nsfw")!.text, /Agent avatar instead/)
+  assert.equal(avatarNotice("failed", "outfit_nsfw")?.tone, "error")
+  assert.match(avatarNotice("failed", "outfit_nsfw")!.text, /keeps the previous avatar/)
+  assert.deepEqual(avatarNotice("failed", "outfit_not_selected"), { tone: "error", text: "Avatar sync failed: outfit_not_selected." })
+  assert.equal(avatarNotice("synced", null), null)
 })
 
 test("only an active override gets a neutral custom-relay marker", () => {

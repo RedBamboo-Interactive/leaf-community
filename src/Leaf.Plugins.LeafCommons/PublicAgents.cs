@@ -150,7 +150,7 @@ public sealed class PublicAgentAvatarSync(
             {
                 await state.SavePublicAgentAsync(settings with
                 {
-                    AvatarSyncStatus = "current", AvatarSyncReason = null,
+                    AvatarSyncStatus = "current", AvatarSyncReason = image.FallbackReason,
                     AvatarResolvedAssetId = image.AssetId, AvatarSyncedAt = DateTimeOffset.UtcNow,
                 }, ct);
                 return new(false, prepared.ContentHash);
@@ -162,14 +162,14 @@ public sealed class PublicAgentAvatarSync(
             await state.SavePublicAgentAsync(settings with
             {
                 Avatar = uploaded.AvatarKey, AvatarContentHash = prepared.ContentHash,
-                AvatarSyncStatus = "synced", AvatarSyncReason = null,
+                AvatarSyncStatus = "synced", AvatarSyncReason = image.FallbackReason,
                 AvatarResolvedAssetId = image.AssetId, AvatarSyncedAt = DateTimeOffset.UtcNow,
             }, ct);
             await audit.RecordAsync("avatar_synced", new Dictionary<string, object?>
             {
                 ["agent_entity_id"] = agentEntityId, ["source"] = settings.AvatarSource,
                 ["asset_id"] = image.AssetId, ["content_hash"] = prepared.ContentHash,
-                ["changed"] = uploaded.Changed,
+                ["changed"] = uploaded.Changed, ["fallback_reason"] = image.FallbackReason,
             }, ct);
             return new(true, prepared.ContentHash, uploaded.AvatarUrl);
         }
@@ -189,10 +189,17 @@ public sealed class PublicAgentAvatarSync(
         => evt.Payload["agentId"]?.GetValue<string>() is { } agentId
             ? TrySyncAsync(agentId, CancellationToken.None) : Task.CompletedTask;
 
-    private Task OnEntityUpdatedAsync(PluginEvent evt)
-        => evt.Payload["typeSlug"]?.GetValue<string>() == "agent"
-            && evt.Payload["id"]?.GetValue<string>() is { } agentId
-            ? TrySyncAsync(agentId, CancellationToken.None) : Task.CompletedTask;
+    private async Task OnEntityUpdatedAsync(PluginEvent evt)
+    {
+        var type = evt.Payload["typeSlug"]?.GetValue<string>();
+        if (type == "agent" && evt.Payload["id"]?.GetValue<string>() is { } agentId)
+            await TrySyncAsync(agentId, CancellationToken.None);
+        // An outfit edited in place (marked nsfw, say) changes what every outfit-sourced avatar may show.
+        else if (type == "outfit")
+            foreach (var agent in await state.ListPublicAgentsAsync(enabledOnly: true))
+                if (agent.AvatarSource == AvatarSources.Outfit)
+                    await TrySyncAsync(agent.AgentEntityId, CancellationToken.None);
+    }
 
     private async Task TrySyncAsync(string agentEntityId, CancellationToken ct)
     {
