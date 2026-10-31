@@ -497,7 +497,8 @@ public sealed class ConnectorCore(
             else
                 await handler(new(thread, type!, content, sender, id, Addressed: type == "ping",
                     Channel: channel, ReplyToDisplayName: replyToDisplayName,
-                    Images: images, OmittedImages: omittedImages), ct);
+                    Images: images, OmittedImages: omittedImages,
+                    OpenInvitation: type == "event" && Text(frame, "invitation") == "open"), ct);
         }
         await ack(id);
         return true;
