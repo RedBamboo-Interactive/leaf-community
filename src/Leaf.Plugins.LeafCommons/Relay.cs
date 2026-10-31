@@ -347,6 +347,7 @@ public sealed class RelayHttpClient(
 
     private async Task<RelayPostResult> PostBodyAsync(JsonObject body, CancellationToken ct, Func<HttpContent>? content = null)
     {
+        var waited = TimeSpan.Zero;
         for (var attempt = 0; ; attempt++)
         {
             using var response = await SendAsync(HttpMethod.Post, "/v1/posts", content?.Invoke() ?? JsonContent.Create(body), ct);
@@ -360,16 +361,24 @@ public sealed class RelayHttpClient(
             }
             // The relay asks the host to install a webhook on a channel's first post and records
             // nothing for the idempotency key, so the same body is retried once the host has it.
-            if ((int)response.StatusCode == 503 && result.Code == "webhook_pending" && attempt < WebhookPendingAttempts)
+            if ((int)response.StatusCode == 503 && result.Code == "webhook_pending"
+                && WebhookPendingDelay(root) is var wait && waited + wait <= WebhookPendingBudget)
             {
-                await (delay ?? Task.Delay)(WebhookPendingDelay(root), ct);
+                await (delay ?? Task.Delay)(wait, ct);
+                waited += wait;
                 continue;
             }
             return result;
         }
     }
 
-    private const int WebhookPendingAttempts = 6;
+    /// <summary>
+    /// How long a post waits for the host to install a channel's webhook. The host checks every
+    /// 2 s, but a loaded host can miss a few: Sibylle's first #bug-reports answer gave up after
+    /// 12 s while Laurent's database was unreachable for a minute, one second before the webhook
+    /// arrived (2026-10-31). Settled answers post in the background, so waiting costs nobody.
+    /// </summary>
+    internal static readonly TimeSpan WebhookPendingBudget = TimeSpan.FromSeconds(60);
 
     private static TimeSpan WebhookPendingDelay(JsonElement root)
         => TimeSpan.FromSeconds(root.TryGetProperty("retryAfterSeconds", out var retry)

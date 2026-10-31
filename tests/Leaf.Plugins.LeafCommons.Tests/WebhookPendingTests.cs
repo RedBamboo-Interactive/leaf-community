@@ -40,8 +40,27 @@ public sealed class WebhookPendingTests
 
         Assert.False(result.Accepted);
         Assert.Equal("webhook_pending", result.Code);
-        Assert.Equal(7, handler.Bodies.Count);
+        Assert.Equal(13, handler.Bodies.Count);
         Assert.All(waits, wait => Assert.Equal(TimeSpan.FromSeconds(5), wait));
+        Assert.Equal(RelayHttpClient.WebhookPendingBudget, TimeSpan.FromTicks(waits.Sum(wait => wait.Ticks)));
+    }
+
+    [Fact]
+    public async Task A_host_that_takes_most_of_a_minute_still_gets_the_post()
+    {
+        // The host was stalled for about a minute (2026-10-31); twelve seconds was not enough.
+        var pending = (HttpStatusCode.ServiceUnavailable, (object)new { decision = "rejected", reason = "webhook_pending", retryAfterSeconds = 2 });
+        var handler = new SequenceHandler([
+            .. Enumerable.Repeat(pending, 25),
+            (HttpStatusCode.OK, new { decision = "posted", messageId = "m-1", threadId = "t-1" }),
+        ]);
+        var waits = new List<TimeSpan>();
+        var relay = Relay(handler, waits);
+
+        var result = await relay.PostAsync("message:root", "Hello", idempotencyKey: "key-1");
+
+        Assert.True(result.Accepted);
+        Assert.Equal(TimeSpan.FromSeconds(50), TimeSpan.FromTicks(waits.Sum(wait => wait.Ticks)));
     }
 
     [Fact]
