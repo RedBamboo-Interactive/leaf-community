@@ -149,6 +149,80 @@ public sealed class ReviewIdentityTests : IDisposable
         Assert.Equal(refused ? KernelComputeIdentity.Mismatch : null, issue.Refusal);
     }
 
+    /// <summary>
+    /// The tester's Nova's first suspect (0.1.10, 2026-10-31): an execution-token caller whose
+    /// RedLeaf user is not the configured owner id, because that id is stale (an older User, one
+    /// that no longer resolves) or from another id space. Whenever an execution identity is in
+    /// flight the review takes who it acts for from that identity, never from configuration.
+    /// </summary>
+    [Theory]
+    [InlineData("older-user")]
+    [InlineData("missing-user")]
+    [InlineData("discord:1546583557567287306")]
+    public async Task An_execution_caller_who_is_not_the_configured_owner_is_never_reviewed_as_the_configuration(
+        string configured)
+    {
+        var configuredOwner = configured switch
+        {
+            "older-user" or "missing-user" => Guid.NewGuid().ToString(),
+            _ => configured,
+        };
+        var (state, entities) = await PublicAgentAsync(configuredOwner: configuredOwner);
+        if (configured == "older-user")
+            entities.Seed(Guid.Parse(configuredOwner), "user", "Fred (before)", "fred-before", new JsonObject());
+        var caller = Callers.AgentExecution(owner, AgentId);
+        var requests = Callers.InFlight(caller);
+        var kernel = new KernelBoundSentinel(requests, owner, configuredOwner);
+        var relay = new MultiAgentRelayHandler();
+
+        // At the brief endpoint this caller is refused (403 owner_agent_required) before any
+        // review, so this shape cannot produce the Sentinel error there.
+        Assert.Null(OwnerGuard.ReadPrivateAgent(caller, await state.GetOwnerSettingsAsync()));
+        // Any review it does reach acts for the token's user, whatever the configuration says.
+        var review = new CommonsOutboundReview(kernel, entities: entities, requests: requests);
+        var brief = await Runtime(state, relay, review)
+            .PostBriefAsync(new("showcase", "Look what I built.", OwnerRequested: true), new(AgentId, owner));
+        var envoy = await new ReviewedEnvoyRelay(new RelayClientFactory(new FixedHttpClientFactory(relay), state).For(AgentId),
+            review, AgentId, state, configuredOwner).PostAsync("message:root", "Here is what I found.");
+
+        Assert.Equal("posted", brief.Decision);
+        Assert.True(envoy.Accepted, envoy.Code);
+        Assert.All(kernel.Calls, call => Assert.Equal(("user", owner), (call.BeneficiaryKind!, call.BeneficiaryId)));
+        Assert.All(kernel.Inner.Requests, request => Assert.Null(request.ComputeProvenance));
+        // 0.1.10 stated the system there, whatever the configured id, and was refused.
+        var shipped = await CommonsComputeProvenance.CreateAsync(null, AgentId,
+            await CommonsComputeProvenance.BeneficiaryAsync(null, configuredOwner, default), [], null, default);
+        Assert.Equal(KernelComputeIdentity.Mismatch, KernelComputeIdentity.Issue(shipped, caller, _ => true).Refusal);
+    }
+
+    /// <summary>
+    /// The second suspect: a token whose subject is not its own user beneficiary (a service, an
+    /// Agent, another user). No RedLeaf issuer mints one, and RedLeaf would refuse every Compute
+    /// call made with it, the Agent's own included. The review inherits it and fails closed the
+    /// same way; restating it as the system would let a service subject act as RedLeaf System
+    /// for a request whose beneficiary is the owner.
+    /// </summary>
+    [Theory]
+    [InlineData("service:redcompute")]
+    [InlineData("agent:nova")]
+    [InlineData("other")]
+    public async Task A_token_whose_subject_is_not_its_beneficiary_fails_closed(string subject)
+    {
+        var (state, entities) = await PublicAgentAsync();
+        var caller = Callers.AgentExecution(owner, AgentId, subject == "other" ? other : subject);
+        var requests = Callers.InFlight(caller);
+        var kernel = new KernelBoundSentinel(requests, owner, other);
+        var relay = new MultiAgentRelayHandler();
+
+        Assert.NotNull(OwnerGuard.ReadPrivateAgent(caller, await state.GetOwnerSettingsAsync()));
+        var result = await Runtime(state, relay, new CommonsOutboundReview(kernel, entities: entities, requests: requests))
+            .PostBriefAsync(new("showcase", "Look what I built.", OwnerRequested: true), new(AgentId, owner));
+
+        Assert.Equal(KernelComputeIdentity.Mismatch, Assert.Single(kernel.Calls).Refusal);
+        Assert.Equal(("blocked", "sentinel_unavailable"), (result.Decision, result.Reason));
+        Assert.DoesNotContain(relay.Requests, item => item.Route == "POST /v1/posts");
+    }
+
     [Fact]
     public async Task Only_the_owners_own_Agent_request_reaches_a_brief_review()
     {
@@ -192,13 +266,14 @@ public sealed class ReviewIdentityTests : IDisposable
         Assert.All(kernel.Calls, call => Assert.True(call.Issued, call.Refusal));
     }
 
-    private async Task<(CommonsStateStore State, MemoryEntityStore Entities)> PublicAgentAsync(bool seedOwner = true)
+    private async Task<(CommonsStateStore State, MemoryEntityStore Entities)> PublicAgentAsync(
+        bool seedOwner = true, string? configuredOwner = null)
     {
         var entities = new MemoryEntityStore();
         if (seedOwner) entities.Seed(Guid.Parse(owner), "user", "Fred", "fred", new JsonObject());
         entities.Seed(Guid.Parse(AgentId), "agent", "Nova", "nova", new JsonObject());
         var state = new CommonsStateStore(entities);
-        await state.SaveOwnerSettingsAsync(new(null, "https://relay.example", "Fred", [], [], [], owner));
+        await state.SaveOwnerSettingsAsync(new(null, "https://relay.example", "Fred", [], [], [], configuredOwner ?? owner));
         await state.SavePublicAgentAsync(new(null, AgentId, "Nova", true, "credential", "active", null,
             ConversationSwitches.Default, [], RestrictedMode: true));
         return (state, entities);

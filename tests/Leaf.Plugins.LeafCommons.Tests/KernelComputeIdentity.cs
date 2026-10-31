@@ -103,10 +103,11 @@ internal sealed class KernelBoundSentinel(IHttpContextAccessor requests, params 
 internal static class Callers
 {
     /// <summary>An Agent's own signed execution bearer from a private discussion of
-    /// <paramref name="userId"/>: the brief endpoint's caller.</summary>
-    public static ClaimsPrincipal AgentExecution(string userId, string agentId) => new(new ClaimsIdentity(
+    /// <paramref name="userId"/>: the brief endpoint's caller. RedLeaf always signs it with that
+    /// user as <paramref name="subject"/>; another subject models a token no issuer mints.</summary>
+    public static ClaimsPrincipal AgentExecution(string userId, string agentId, string? subject = null) => new(new ClaimsIdentity(
     [
-        new Claim("sub", userId),
+        new Claim("sub", subject ?? userId),
         new Claim("token_use", "execution"),
         new Claim("execution_identity", new JsonObject
         {
