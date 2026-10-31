@@ -430,7 +430,7 @@ public sealed class PublicAgentConversationCoordinator(
                 0, record.ThreadSeenAt);
         }
         return BuildThreadContext(messages, record.ThreadSeenAt, agent.EnvoyId, request.Content,
-            request.OpenInvitation);
+            request.OpenInvitation, CommonsConversations.IsChannel(record.ThreadRef));
     }
 
     /// <summary>
@@ -440,14 +440,22 @@ public sealed class PublicAgentConversationCoordinator(
     internal const string OpenInvitationHeader =
         "[An open invitation to every Agent in Leaf Community (the @Novas role), not addressed to you: answer only if you have something to add; you may ignore it]";
 
+    /// <param name="channel">The conversation is a text channel (<c>channel:&lt;id&gt;</c>), whose
+    /// history is the channel's recent window rather than a thread.</param>
     internal static ThreadContext BuildThreadContext(IReadOnlyList<RelayThreadMessage> messages,
-        DateTimeOffset? seenAt, string? ownEnvoyId, string ping, bool openInvitation = false)
+        DateTimeOffset? seenAt, string? ownEnvoyId, string ping, bool openInvitation = false,
+        bool channel = false)
     {
         var newest = messages.Count == 0 ? seenAt : messages.Max(message => message.At);
         if (seenAt is { } seen && newest < seen) newest = seen;
+        bool Own(RelayThreadMessage message)
+            => ownEnvoyId is not null && message.Author.EnvoyId == ownEnvoyId;
+        // A session that has looked before holds the Agent's own posts in its transcript. One that
+        // never has (new, or a new generation) does not: its own earlier posts here came from
+        // another session, so it is shown them.
         var unseen = messages
             .Where(message => seenAt is null || message.At > seenAt)
-            .Where(message => ownEnvoyId is null || message.Author.EnvoyId != ownEnvoyId)
+            .Where(message => seenAt is null || !Own(message))
             .OrderBy(message => message.At)
             .ToList();
         // The ping is already in the thread as its newest human message; drop that one copy.
@@ -464,7 +472,11 @@ public sealed class PublicAgentConversationCoordinator(
                     .Concat(images.Select(image => $"[image: {image.Filename}]"))
                     .Where(line => line.Length > 0))
                 : message.Text;
-            var line = $"{message.Author.Name}: {text}";
+            // The owner mark comes from the relay's verified Discord IDs, never from a name.
+            var author = Own(message) ? $"{message.Author.Name} (you)"
+                : message.Author.IsYourOwner ? $"{message.Author.Name} (your owner)"
+                : message.Author.Name;
+            var line = $"{author}: {text}";
             if (size + line.Length > ThreadContextCharacters) break;
             lines.Add(line);
             size += line.Length;
@@ -472,9 +484,10 @@ public sealed class PublicAgentConversationCoordinator(
         if (lines.Count == 0) return new(openInvitation ? $"{OpenInvitationHeader}\n{ping}" : ping, 0, newest);
         lines.Reverse();
         var skipped = unseen.Count - lines.Count;
+        var place = channel ? "channel" : "thread";
         var header = skipped > 0
-            ? $"[Said in this thread since you last looked; {skipped} older message(s) not shown]"
-            : "[Said in this thread since you last looked]";
+            ? $"[Said in this {place} since you last looked; {skipped} older message(s) not shown]"
+            : $"[Said in this {place} since you last looked]";
         var trigger = openInvitation ? OpenInvitationHeader : "[The message addressed to you]";
         return new($"{header}\n{string.Join("\n\n", lines)}\n\n{trigger}\n{ping}",
             lines.Count, newest);
@@ -516,6 +529,8 @@ public sealed class PublicAgentConversationCoordinator(
         finally { gate.Release(); }
     }
 
+    /// <summary>A new session has seen nothing, so its first turn carries the recent history, as
+    /// native Discord's gap restarts with each binding generation.</summary>
     private static CommonsExternalConversation NextGeneration(CommonsExternalConversation current)
         => current with
         {
@@ -525,6 +540,7 @@ public sealed class PublicAgentConversationCoordinator(
             SessionId = null,
             CursorEpoch = null,
             CursorSequence = 0,
+            ThreadSeenAt = null,
         };
 
     private async Task<ExternalConversationHandle> EnsureConversationAsync(
@@ -803,10 +819,10 @@ public sealed class PublicAgentConversationCoordinator(
             outbound.Add(new(file.Bytes, mediaType, CommonsImages.Caption(image.Description)));
         }
 
-        // The relay starts a text-channel chain reply with a "Replying to" line, so those parts
-        // leave room for it under Discord's 2,000 characters.
+        // The relay starts a text-channel reply with a "Replying to" line, so those parts leave
+        // room for it under Discord's 2,000 characters.
         var chunks = CommonsMessageChunker.Split(content,
-            record.ThreadRef.StartsWith("message:", StringComparison.Ordinal) ? 1_850 : 2_000);
+            CommonsConversations.InTextChannel(record.ThreadRef) ? 1_850 : 2_000);
         if (chunks.Count == 0) chunks = [""];
         for (var index = 0; index < chunks.Count; index++)
         {
@@ -1020,6 +1036,20 @@ public sealed class PublicAgentConversationCoordinator(
         foreach (var gate in gates.Values) gate.Dispose();
         gates.Clear();
     }
+}
+
+/// <summary>
+/// The relay's conversation references. A text channel is one conversation,
+/// <c>channel:&lt;id&gt;</c>; <c>message:&lt;root&gt;</c> chains are an Envoy's top-level posts and
+/// chains from before channel conversations; anything else is a Discord thread or forum post.
+/// </summary>
+public static class CommonsConversations
+{
+    public static bool IsChannel(string? threadRef)
+        => threadRef?.StartsWith("channel:", StringComparison.Ordinal) == true;
+
+    public static bool InTextChannel(string? threadRef)
+        => IsChannel(threadRef) || threadRef?.StartsWith("message:", StringComparison.Ordinal) == true;
 }
 
 public static class CommonsMessageChunker

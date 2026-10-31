@@ -19,7 +19,10 @@ public sealed record RelayThreadSummary(
 /// <summary>A channel the relay lets this Envoy write in.</summary>
 public sealed record RelayChannel(string Id, string Name, string Kind);
 public sealed record RelayChannels(IReadOnlyList<RelayChannel> Channels, string? DefaultChannelId);
-public sealed record RelayThreadAuthor(string Kind, string Name, string? AvatarUrl = null, string? EnvoyId = null);
+/// <param name="IsYourOwner">The relay matched this human's Discord ID to the reading Envoy's
+/// verified owner. Never inferred from a name.</param>
+public sealed record RelayThreadAuthor(string Kind, string Name, string? AvatarUrl = null, string? EnvoyId = null,
+    bool IsYourOwner = false);
 public sealed record RelayThreadMessage(
     string Id, DateTimeOffset At, RelayThreadAuthor Author, string Text, string? Scenario = null,
     IReadOnlyList<RelayImageAttachment>? Images = null);
@@ -268,7 +271,8 @@ public sealed class RelayHttpClient(
             list.Add(new(
                 String(item, "id") ?? Guid.NewGuid().ToString("N"),
                 Time(item, "createdAt"),
-                new(kind, name, String(actor, "avatarUrl"), String(actor, "envoyId")),
+                new(kind, name, String(actor, "avatarUrl"), String(actor, "envoyId"),
+                    kind == "human" && Boolean(actor, "isYourOwner") == true),
                 String(item, "content") ?? "",
                 String(item, "scenario"),
                 ConnectorCore.ParseImages(item).Images is { Count: > 0 } images ? images : null));
