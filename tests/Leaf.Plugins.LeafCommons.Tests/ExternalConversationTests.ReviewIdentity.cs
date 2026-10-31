@@ -20,7 +20,7 @@ public sealed partial class ExternalConversationTests
         var requests = new HttpContextAccessor();
         var kernel = new KernelBoundSentinel(requests, owner, other);
         var fixture = await CreateAsync(kernel: kernel, requests: requests, ownerUserId: owner);
-        fixture.Entities.Seed(Guid.Parse(owner), "user", "Fred", "fred", new JsonObject());
+        fixture.Entities.Seed(Guid.Parse(owner), "user", "Frank", "frank", new JsonObject());
         await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-1", "Can you look?"));
         fixture.Provider.Messages = [Message(1, "assistant", "text", "Here is the fix.")];
 
@@ -40,7 +40,7 @@ public sealed partial class ExternalConversationTests
     [Fact]
     public async Task A_settled_reply_for_an_owner_without_a_user_is_still_reviewed_as_the_system()
     {
-        // 2dff982 (Fred's install): no request, no execution scope, and an owner RedLeaf cannot
+        // 2dff982 (a peer install): no request, no execution scope, and an owner RedLeaf cannot
         // authenticate. The review names the bounded system principal and is signed.
         var requests = new HttpContextAccessor();
         var kernel = new KernelBoundSentinel(requests);

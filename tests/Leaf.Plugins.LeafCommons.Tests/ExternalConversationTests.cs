@@ -239,14 +239,14 @@ public sealed partial class ExternalConversationTests : IDisposable
             Request("ping-1", "Where does the crash log go?"));
         fixture.Provider.Messages =
         [
-            Message(1, "assistant", "text", "It is in C:\\Users\\fred\\AppData\\Leaf\\crash.log."),
+            Message(1, "assistant", "text", "It is in C:\\Users\\frank\\AppData\\Leaf\\crash.log."),
         ];
 
         await fixture.Provider.NotifyAsync();
         await fixture.Coordinator.WhenIdleAsync();
 
         var post = Assert.Single(fixture.Relay.Requests, item => item.Route == "POST /v1/posts");
-        Assert.DoesNotContain("fred", post.Body, StringComparison.Ordinal);
+        Assert.DoesNotContain("frank", post.Body, StringComparison.Ordinal);
         using (var body = JsonDocument.Parse(post.Body))
             Assert.Equal("I wrote a reply but couldn't post it here (error code: local_path).",
                 body.RootElement.GetProperty("content").GetString());
@@ -319,7 +319,7 @@ public sealed partial class ExternalConversationTests : IDisposable
         Assert.Null(request.Compute);
         Assert.Equal(UntrustedContentSources.LeafCommons, request.Origin.Source);
         // The settled-turn review has no request scope to inherit, so it carries its own
-        // provenance; without it RedLeaf refuses the Compute call (Fred's install, 2026-10-28).
+        // provenance; without it RedLeaf refuses the Compute call (a peer install, 2026-10-28).
         var provenance = Assert.IsType<ComputeProvenance>(request.ComputeProvenance);
         Assert.Equal(LeafCommonsPlugin.PluginId, provenance.Origin.App.Id);
         Assert.Equal("agent", provenance.Actor.Kind);
@@ -588,12 +588,12 @@ public sealed partial class ExternalConversationTests : IDisposable
             });
         var state = new CommonsStateStore(entities);
         var owner = await state.SaveOwnerSettingsAsync(new(null, relayBaseUrl,
-            "Lynial", [], canaries ?? [], [], ownerUserId, "Lynial"));
+            "Alice", [], canaries ?? [], [], ownerUserId, "Alice"));
         var agent = await state.SavePublicAgentAsync(new(null, AgentId, "Nova", true,
             credential, "active", null,
             new ConversationSwitches(StartsConversations: true), [],
             EnvoyId: "envoy-own", RestrictedMode: restrictedMode));
-        var relay = new MultiAgentRelayHandler("Lynial", rejectFirstPost);
+        var relay = new MultiAgentRelayHandler("Alice", rejectFirstPost);
         var provider = new FakeExternalProvider();
         var digest = new CommonsDigestSink(state, new DigestFormatter(), state);
         var sentinel = kernel?.Inner ?? new TestSentinel();
@@ -629,14 +629,14 @@ public sealed partial class ExternalConversationTests : IDisposable
     [Fact]
     public async Task A_ping_carries_what_was_said_in_the_thread_since_the_Agent_last_looked()
     {
-        // Sibylle, 2026-10-29: "je ne lis pas tout le thread". Being addressed decides when the
+        // Dana, 2026-10-29: "je ne lis pas tout le thread". Being addressed decides when the
         // Agent speaks, not what it can read.
         var fixture = await CreateAsync();
         var start = DateTimeOffset.Parse("2026-10-29T18:00:00Z");
         for (var index = 0; index < 120; index++)
             fixture.Relay.ThreadMessages.Add(Human($"old-{index}", start.AddSeconds(index), "Bob", $"filler {index}"));
         fixture.Relay.ThreadMessages.Add(Human("h-1", start.AddMinutes(5), "Bob", "The build fails on step 3."));
-        fixture.Relay.ThreadMessages.Add(Human("h-2", start.AddMinutes(6), "Lynial", "Can you look at this?"));
+        fixture.Relay.ThreadMessages.Add(Human("h-2", start.AddMinutes(6), "Alice", "Can you look at this?"));
 
         await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-1", "Can you look at this?"));
 
@@ -647,9 +647,9 @@ public sealed partial class ExternalConversationTests : IDisposable
         Assert.Equal(PublicAgentConversationCoordinator.ThreadContextMessages,
             first.Metadata!["thread_context_messages"]!.GetValue<int>());
 
-        fixture.Relay.ThreadMessages.Add(Envoy("e-1", start.AddMinutes(7), "Nova · Lynial", fixture.Agent.EnvoyId, "Looking."));
+        fixture.Relay.ThreadMessages.Add(Envoy("e-1", start.AddMinutes(7), "Nova · Alice", fixture.Agent.EnvoyId, "Looking."));
         fixture.Relay.ThreadMessages.Add(Human("h-3", start.AddMinutes(8), "Bob", "It also fails on step 4."));
-        fixture.Relay.ThreadMessages.Add(Human("h-4", start.AddMinutes(9), "Lynial", "And now?"));
+        fixture.Relay.ThreadMessages.Add(Human("h-4", start.AddMinutes(9), "Alice", "And now?"));
 
         await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, Request("ping-2", "And now?"));
 
@@ -687,7 +687,7 @@ public sealed partial class ExternalConversationTests : IDisposable
     {
         var entities = new MemoryEntityStore();
         var userId = Guid.NewGuid();
-        entities.Seed(userId, "user", "Fred", "fred", new JsonObject());
+        entities.Seed(userId, "user", "Frank", "frank", new JsonObject());
 
         var owner = await CommonsComputeProvenance.BeneficiaryAsync(entities, userId.ToString(), default);
         var missing = await CommonsComputeProvenance.BeneficiaryAsync(entities, Guid.NewGuid().ToString(), default);

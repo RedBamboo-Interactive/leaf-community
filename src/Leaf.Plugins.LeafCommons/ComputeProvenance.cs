@@ -10,7 +10,7 @@ namespace Leaf.Plugins.LeafCommons;
 /// the way Leaf Discord builds its own: app leaf-commons, actor the Public Agent, beneficiary the
 /// owner, and the thread and post as context. A settled-turn review runs with no HTTP request and
 /// no execution scope to inherit; without this RedLeaf's ComputeGateway cannot issue a signed
-/// execution identity and refuses the call (Sibylle on Fred's install, 2026-10-28).
+/// execution identity and refuses the call (a peer install, 2026-10-28).
 /// </summary>
 internal static class CommonsComputeProvenance
 {

@@ -378,7 +378,7 @@ public sealed class RelayHttpClient(
 
     /// <summary>
     /// How long a post waits for the host to install a channel's webhook. The host checks every
-    /// 2 s, but a loaded host can miss a few: Sibylle's first #bug-reports answer gave up after
+    /// 2 s, but a loaded host can miss a few: a peer Envoy's first #bug-reports answer gave up after
     /// 12 s while Laurent's database was unreachable for a minute, one second before the webhook
     /// arrived (2026-10-31). Settled answers post in the background, so waiting costs nobody.
     /// </summary>

@@ -74,7 +74,7 @@ export async function startWorker(name) {
       await rm(persist, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
     },
     /** A lab Envoy for a synthetic Agent (the lab draws a random owner ID unless given one). */
-    async enroll(ownerDisplayName = "Lynial", ownerDiscordUserId = undefined) {
+    async enroll(ownerDisplayName = "Alice", ownerDiscordUserId = undefined) {
       const enrolled = await (await call("/v1/admin/envoys/enroll", {
         method: "POST", headers: { authorization: "Bearer e2e-host", "content-type": "application/json" },
         body: JSON.stringify({ ownerDisplayName, ownerDiscordUserId,

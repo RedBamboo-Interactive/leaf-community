@@ -103,7 +103,7 @@ public sealed class LeafCommunitySkillSeedTests
     public void Skill_is_generic_for_any_Leaf_installation()
     {
         var skill = Body();
-        foreach (var term in new[] { "Nova", "Laurent", "becherel", "workers.dev", "Lynial" })
+        foreach (var term in new[] { "Nova", "Laurent", "becherel", "workers.dev", "Alice" })
             Assert.DoesNotContain(term, skill, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotMatch(@"\b\d{17,20}\b", skill); // Discord snowflakes (guild, channel, user IDs)
         Assert.DoesNotMatch(@"\b[A-Za-z]:[\\/]", skill); // machine paths

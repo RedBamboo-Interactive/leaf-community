@@ -34,7 +34,7 @@ public sealed partial class ExternalConversationTests
         channel.Add(Owner("t-1", start.AddMinutes(11), "Montre ton costume"));
         await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, ChannelPing("ping-1", "Montre ton costume"));
 
-        channel.Add(Envoy("e-1", start.AddMinutes(12), "Nova · Lynial", fixture.Agent.EnvoyId, "Voici un costume."));
+        channel.Add(Envoy("e-1", start.AddMinutes(12), "Nova · Alice", fixture.Agent.EnvoyId, "Voici un costume."));
         channel.Add(Human("h-1", start.AddMinutes(13), "Bob", "Nice one"));
         channel.Add(Owner("t-2", start.AddMinutes(15), "Je parle de ton avatar actuel"));
         await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, ChannelPing("ping-2", "Je parle de ton avatar actuel"));
@@ -62,9 +62,9 @@ public sealed partial class ExternalConversationTests
 
         // The owner, verified by the relay, is marked when they appear as context.
         channel.Add(Owner("t-4", start.AddMinutes(20), "Merci !"));
-        channel.Add(Human("h-3", start.AddMinutes(21), "Bob", "Nova · Lynial, a question for you"));
+        channel.Add(Human("h-3", start.AddMinutes(21), "Bob", "Nova · Alice, a question for you"));
         await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, new EnvoyRunRequest(General, "channel_reply",
-            "Nova · Lynial, a question for you", "{\"kind\":\"human\",\"discordUserId\":\"u-Bob\",\"displayName\":\"Bob\"}",
+            "Nova · Alice, a question for you", "{\"kind\":\"human\",\"discordUserId\":\"u-Bob\",\"displayName\":\"Bob\"}",
             "ping-4", Addressed: true, Channel: "general"));
         Assert.Contains("Camille (your owner): Merci !", fixture.Provider.Inputs[^1].Content, StringComparison.Ordinal);
         Assert.Single(fixture.Provider.Opens);
@@ -95,7 +95,7 @@ public sealed partial class ExternalConversationTests
         Assert.Equal([General, General], posts.Select(post => post["threadRef"]!.GetValue<string>()));
         Assert.Equal("Voici un costume.", posts[0]["content"]!.GetValue<string>());
         Assert.EndsWith(CommonsOutboundReview.WithheldNotice, posts[1]["content"]!.GetValue<string>());
-        fixture.Relay.ThreadMessages.Add(Envoy("e-2", start.AddMinutes(16), "Nova · Lynial", fixture.Agent.EnvoyId,
+        fixture.Relay.ThreadMessages.Add(Envoy("e-2", start.AddMinutes(16), "Nova · Alice", fixture.Agent.EnvoyId,
             posts[1]["content"]!.GetValue<string>()));
 
         fixture.Sentinel.Decide = _ => TestSentinel.Clean;
@@ -119,12 +119,12 @@ public sealed partial class ExternalConversationTests
         var fixture = await CreateAsync();
         var start = DateTimeOffset.Parse("2026-10-31T17:00:00Z");
         // Posted before this conversation existed (a legacy chain in the channel, or a brief).
-        fixture.Relay.ThreadMessages.Add(Envoy("e-0", start, "Nova · Lynial", fixture.Agent.EnvoyId, "Earlier answer."));
+        fixture.Relay.ThreadMessages.Add(Envoy("e-0", start, "Nova · Alice", fixture.Agent.EnvoyId, "Earlier answer."));
         fixture.Relay.ThreadMessages.Add(Owner("t-1", start.AddMinutes(1), "Et maintenant ?"));
         await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, ChannelPing("ping-1", "Et maintenant ?"));
-        Assert.Contains("Nova · Lynial (you): Earlier answer.", fixture.Provider.Inputs[^1].Content, StringComparison.Ordinal);
+        Assert.Contains("Nova · Alice (you): Earlier answer.", fixture.Provider.Inputs[^1].Content, StringComparison.Ordinal);
 
-        fixture.Relay.ThreadMessages.Add(Envoy("e-1", start.AddMinutes(2), "Nova · Lynial", fixture.Agent.EnvoyId, "Answer from this session."));
+        fixture.Relay.ThreadMessages.Add(Envoy("e-1", start.AddMinutes(2), "Nova · Alice", fixture.Agent.EnvoyId, "Answer from this session."));
         fixture.Relay.ThreadMessages.Add(Owner("t-2", start.AddMinutes(3), "Ok"));
         await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, ChannelPing("ping-2", "Ok"));
         Assert.Equal("Ok", fixture.Provider.Inputs[^1].Content);
@@ -135,7 +135,7 @@ public sealed partial class ExternalConversationTests
         fixture.Relay.ThreadMessages.Add(Owner("t-3", start.AddMinutes(4), "On reprend"));
         await fixture.Coordinator.SubmitAsync(fixture.Agent, fixture.Owner, ChannelPing("ping-3", "On reprend"));
         Assert.Equal(2L, fixture.Provider.Inputs[^1].Metadata!["generation"]!.GetValue<long>());
-        Assert.Contains("Nova · Lynial (you): Answer from this session.", fixture.Provider.Inputs[^1].Content, StringComparison.Ordinal);
+        Assert.Contains("Nova · Alice (you): Answer from this session.", fixture.Provider.Inputs[^1].Content, StringComparison.Ordinal);
     }
 
     [Fact]

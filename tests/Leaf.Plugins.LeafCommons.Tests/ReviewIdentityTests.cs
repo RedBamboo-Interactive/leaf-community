@@ -169,7 +169,7 @@ public sealed class ReviewIdentityTests : IDisposable
         };
         var (state, entities) = await PublicAgentAsync(configuredOwner: configuredOwner);
         if (configured == "older-user")
-            entities.Seed(Guid.Parse(configuredOwner), "user", "Fred (before)", "fred-before", new JsonObject());
+            entities.Seed(Guid.Parse(configuredOwner), "user", "Frank (before)", "frank-before", new JsonObject());
         var caller = Callers.AgentExecution(owner, AgentId);
         var requests = Callers.InFlight(caller);
         var kernel = new KernelBoundSentinel(requests, owner, configuredOwner);
@@ -270,10 +270,10 @@ public sealed class ReviewIdentityTests : IDisposable
         bool seedOwner = true, string? configuredOwner = null)
     {
         var entities = new MemoryEntityStore();
-        if (seedOwner) entities.Seed(Guid.Parse(owner), "user", "Fred", "fred", new JsonObject());
+        if (seedOwner) entities.Seed(Guid.Parse(owner), "user", "Frank", "frank", new JsonObject());
         entities.Seed(Guid.Parse(AgentId), "agent", "Nova", "nova", new JsonObject());
         var state = new CommonsStateStore(entities);
-        await state.SaveOwnerSettingsAsync(new(null, "https://relay.example", "Fred", [], [], [], configuredOwner ?? owner));
+        await state.SaveOwnerSettingsAsync(new(null, "https://relay.example", "Frank", [], [], [], configuredOwner ?? owner));
         await state.SavePublicAgentAsync(new(null, AgentId, "Nova", true, "credential", "active", null,
             ConversationSwitches.Default, [], RestrictedMode: true));
         return (state, entities);

@@ -102,20 +102,20 @@ public sealed class MultiAgentTests : IDisposable
         await store.SaveOwnerSettingsAsync(new(null, "https://relay.example", "Laurent",
             [], [], [], "test"));
         await store.SavePublicAgentAsync(Agent(NovaId, "Nova", "credential-one"));
-        var handler = new MultiAgentRelayHandler("Lynial");
+        var handler = new MultiAgentRelayHandler("Alice");
         await using var coordinator = Coordinator(store, entities, handler);
 
         var profile = await coordinator.ReconcileRelayProfileAsync(NovaId);
 
-        Assert.Equal("Lynial", profile.PublicName);
+        Assert.Equal("Alice", profile.PublicName);
         var owner = await store.GetOwnerSettingsAsync();
-        Assert.Equal("Lynial", owner.PublicName);
-        Assert.Equal("Lynial", owner.RelayConfirmedPublicName);
+        Assert.Equal("Alice", owner.PublicName);
+        Assert.Equal("Alice", owner.RelayConfirmedPublicName);
         var request = Assert.Single(handler.Requests);
         Assert.Equal("{}", request.Body);
         Assert.DoesNotContain("Laurent", request.Body);
         Assert.False(CommonsEndpoints.IsExplicitPublicNameChange(
-            "Laurent", clientConfirmed: null, currentRelayConfirmed: "Lynial"));
+            "Laurent", clientConfirmed: null, currentRelayConfirmed: "Alice"));
     }
 
     [Fact]
@@ -124,14 +124,14 @@ public sealed class MultiAgentTests : IDisposable
         var entities = new MemoryEntityStore();
         var store = new CommonsStateStore(entities);
         var owner = await store.SaveOwnerSettingsAsync(new(null, "https://relay.example",
-            "Lynial", [], [], [], "test", "Lynial"));
+            "Alice", [], [], [], "test", "Alice"));
         var agent = await store.SavePublicAgentAsync(Agent(NovaId, "Nova", "credential-one"));
 
         var persona = agent.DisplayPersona(owner.PublicName);
         var utf8 = JsonSerializer.SerializeToUtf8Bytes(new { persona });
         using var json = JsonDocument.Parse(utf8);
 
-        Assert.Equal("Nova · Lynial", json.RootElement.GetProperty("persona").GetString());
+        Assert.Equal("Nova · Alice", json.RootElement.GetProperty("persona").GetString());
         var stored = Assert.Single(await entities.QueryAsync(new() { TypeSlug = "leaf-commons-public-agent" }));
         Assert.False(stored.Data.ContainsKey("persona"));
     }
