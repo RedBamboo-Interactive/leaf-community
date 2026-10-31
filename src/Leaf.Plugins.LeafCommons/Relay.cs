@@ -574,7 +574,7 @@ public sealed class RelayConnector(Func<CancellationToken, Task<(Uri BaseUri, st
         if (running is not null) return Task.CompletedTask;
         running = CancellationTokenSource.CreateLinkedTokenSource(stopping);
         var token = running.Token;
-        loop = Task.Run(() => LoopAsync(token), CancellationToken.None);
+        loop = Detached.Run(() => LoopAsync(token));
         return Task.CompletedTask;
     }
 

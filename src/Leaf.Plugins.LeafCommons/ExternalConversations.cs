@@ -272,12 +272,13 @@ public sealed class PublicAgentConversationCoordinator(
     }
 
     /// <summary>Runs work in the background, registered before it starts, so a run that finishes
-    /// at once never leaves a stale entry for <see cref="WhenIdleAsync"/>.</summary>
+    /// at once never leaves a stale entry for <see cref="WhenIdleAsync"/>. It runs detached from
+    /// the settle callback that scheduled it, so its reviews state the owner's provenance.</summary>
     private void Track(string name, Func<Task> work)
     {
         var key = $"{name}:{Guid.NewGuid():N}";
         var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        running[key] = Task.Run(async () =>
+        running[key] = Detached.Run(async () =>
         {
             await start.Task;
             try { await work(); }
@@ -572,7 +573,7 @@ public sealed class PublicAgentConversationCoordinator(
             var dueAt = DateTimeOffset.UtcNow + wait;
             if (timers.TryGetValue(bindingId, out var pending) && pending <= dueAt) return;
             timers[bindingId] = dueAt;
-            _ = Task.Run(async () =>
+            _ = Detached.Run(async () =>
             {
                 try { await Task.Delay(wait, stopping.Token); }
                 catch (OperationCanceledException) { return; }

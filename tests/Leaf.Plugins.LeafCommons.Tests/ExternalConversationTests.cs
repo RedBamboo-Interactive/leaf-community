@@ -520,7 +520,8 @@ public sealed partial class ExternalConversationTests : IDisposable
         IReadOnlyList<string>? canaries = null, bool restrictedMode = false,
         string? rejectFirstPost = null, IAssets? assets = null, HttpMessageHandler? cdn = null,
         bool noSentinel = false, string relayBaseUrl = "https://relay.example", string credential = "credential",
-        HttpMessageHandler? liveRelay = null)
+        HttpMessageHandler? liveRelay = null, KernelBoundSentinel? kernel = null,
+        Microsoft.AspNetCore.Http.IHttpContextAccessor? requests = null, string ownerUserId = "owner-1")
     {
         var entities = new MemoryEntityStore();
         entities.Seed(Guid.NewGuid(), "quality-mode", "Deep Codex", "deep-codex",
@@ -532,7 +533,7 @@ public sealed partial class ExternalConversationTests : IDisposable
             });
         var state = new CommonsStateStore(entities);
         var owner = await state.SaveOwnerSettingsAsync(new(null, relayBaseUrl,
-            "Lynial", [], canaries ?? [], [], "owner-1", "Lynial"));
+            "Lynial", [], canaries ?? [], [], ownerUserId, "Lynial"));
         var agent = await state.SavePublicAgentAsync(new(null, AgentId, "Nova", true,
             credential, "active", null,
             new ConversationSwitches(StartsConversations: true), [],
@@ -540,14 +541,15 @@ public sealed partial class ExternalConversationTests : IDisposable
         var relay = new MultiAgentRelayHandler("Lynial", rejectFirstPost);
         var provider = new FakeExternalProvider();
         var digest = new CommonsDigestSink(state, new DigestFormatter(), state);
-        var sentinel = new TestSentinel();
+        var sentinel = kernel?.Inner ?? new TestSentinel();
         var coordinator = new PublicAgentConversationCoordinator(
             new CommonsExternalConversationStore(entities), state,
             new CommonsRuntimeOptionsResolver(entities),
             new RelayClientFactory(new FixedHttpClientFactory(liveRelay ?? relay), state),
             new OutboundFilter(new SecretScanner()), digest, state, [provider],
             NullLogger<PublicAgentConversationCoordinator>.Instance,
-            noSentinel ? CommonsOutboundReview.Unavailable : new CommonsOutboundReview(sentinel, entities: entities),
+            noSentinel ? CommonsOutboundReview.Unavailable
+                : new CommonsOutboundReview((IUntrustedContentReview?)kernel ?? sentinel, entities: entities, requests: requests),
             cdn is null || assets is null ? null : new CommonsInboundImages(new HttpClient(cdn), assets, state),
             assets)
         {
