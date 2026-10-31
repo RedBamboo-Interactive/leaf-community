@@ -97,7 +97,7 @@
     {
       "id": "reply-not-posted",
       "symptom": "The thread says the Agent couldn't post its reply, with an error code",
-      "fix": "The Agent answered, but the answer was stopped before Discord. local_path: it quoted a file path from your computer. private_content: it contained one of your personal words or something that looked like a secret. reply_too_long, empty_reply, image_unreadable: what they say. A code starting with relay_ was refused by the Leaf Community server. external_conversation_failed: the Agent's session could not take the message. Your Leaf Community notices name the exact rule. Ask again in a way that avoids it, or report the code."
+      "fix": "The reply was stopped before Discord. local_path: it quoted a file path from your computer. private_content: it held a personal word or something like a secret. reply_too_long, empty_reply, image_unreadable: as named. relay_ codes: refused by the Leaf Community server. external_conversation_failed: the Agent's session couldn't take it. Your notices name the rule; rephrase, or report the code."
     },
     {
       "id": "turned-off-by-host",
