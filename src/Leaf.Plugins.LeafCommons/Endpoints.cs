@@ -31,7 +31,8 @@ public static class CommonsEndpoints
                 ? [] : await directory.ListAsync(directoryOwner, ct);
             return Results.Ok(SettingsProjection(configuration, owned,
                 await avatars.IsOutfitsAvailableAsync(ct)));
-        });
+        })
+            .WithSummary("Returns the owner's Leaf Community settings and, for each of their Agents, whether it is public and its connection status. Owner or admin only.");
         group.MapPut("/settings", async (SettingsUpdate update, IAuthContext auth,
             CommonsStateStore store, AgentDirectory directory, RelayClientFactory relays,
             PublicAgentAvatarSync avatars, PublicAgentCoordinator coordinator,
@@ -206,7 +207,8 @@ public static class CommonsEndpoints
             if (resumes.Count > 0)
                 projection["relayResume"] = JsonSerializer.SerializeToNode(resumes, JsonSerializerOptions.Web);
             return Results.Ok(projection);
-        });
+        })
+            .WithSummary("Saves the owner's Leaf Community settings and each Agent's public, avatar, shareable folder and conversation switches, then syncs them to the relay. Owner or admin only; the body must include publicName, personalWords, canaries, linkAllowlist and agents.");
         group.MapGet("/oauth/start", async (string callback, string agentId, bool? rejoin, IAuthContext auth, RelayClientFactory relays, CommonsStateStore store,
             AgentDirectory directory, CancellationToken ct) =>
         {
@@ -223,7 +225,8 @@ public static class CommonsEndpoints
             var callbackWithState = AddQuery(callback, "state", oauth.State);
             return Results.Ok(new { authorizeUrl = await relays.ForEnrollment(agentId)
                 .BuildAuthorizeUriAsync(callbackWithState, ct, agentId, owned.Name) });
-        });
+        })
+            .WithSummary("Starts connecting a public Agent to the relay and returns the authorizeUrl to open in a browser. The Agent must already be public, and an already active connection needs rejoin=true.");
         group.MapGet("/oauth/callback", async (string exchangeCode, string? state, IAuthContext auth,
             RelayClientFactory relays, CommonsStateStore store, AgentDirectory directory,
             PublicAgentAvatarSync avatars, PublicAgentCoordinator coordinator, CancellationToken ct) =>
@@ -260,7 +263,8 @@ public static class CommonsEndpoints
             await coordinator.AssignSkillAsync(saved.AgentEntityId, add: true, ct);
             await coordinator.RefreshAsync(saved.AgentEntityId, ct);
             return Results.Redirect("/extensions/leaf-commons?joined=pending");
-        });
+        })
+            .WithSummary("Completes the relay sign-in with the exchangeCode and state from /oauth/start, stores the Agent's relay connection and redirects to the extension page. Meant for the browser redirect, not for direct calls.");
         group.MapGet("/threads", async (string? agentId, IAuthContext auth, CommonsStateStore store,
             PublicAgentThreads threads, CancellationToken ct) =>
         {
@@ -271,7 +275,8 @@ public static class CommonsEndpoints
             {
                 return Results.Json(new { error = error.Reason, message = error.Message }, statusCode: error.StatusCode);
             }
-        });
+        })
+            .WithSummary("Lists the public conversations held by the owner's public Agents, optionally for one agentId. Owner or admin only.");
         group.MapGet("/threads/{threadRef}", async (string threadRef, IAuthContext auth,
             CommonsStateStore store, PublicAgentThreads threads, CancellationToken ct) =>
         {
@@ -282,7 +287,8 @@ public static class CommonsEndpoints
             {
                 return Results.Json(new { error = error.Reason, message = error.Message }, statusCode: error.StatusCode);
             }
-        });
+        })
+            .WithSummary("Returns one public conversation, with the messages in it. Owner or admin only.");
         group.MapPost("/threads/{threadRef}/clear", async (string threadRef, string agentId,
             IAuthContext auth, CommonsStateStore store,
             PublicAgentConversationCoordinator conversations, CancellationToken ct) =>
@@ -293,7 +299,8 @@ public static class CommonsEndpoints
             return cleared is null
                 ? Results.NotFound(new { error = "public_conversation_not_found" })
                 : Results.Ok(new { cleared.Generation, cleared.SessionId });
-        });
+        })
+            .WithSummary("Clears a public conversation for the Agent agentId by starting a new session, so the Agent no longer remembers it. Owner or admin only; returns 404 when the Agent has no such conversation.");
         group.MapPost("/briefs", async (BriefSubmission request, HttpContext http,
             CommonsStateStore store, AgentDirectory directory, PublicAgentRuntime runtime,
             CancellationToken ct) =>
@@ -313,29 +320,34 @@ public static class CommonsEndpoints
                     { decision = result.Decision, messageId = result.MessageId, reason = result.Reason });
             }
             catch (ArgumentException ex) { return Results.BadRequest(new { error = "invalid_brief", message = ex.Message }); }
-        });
+        })
+            .WithSummary("Posts a brief to the community as the calling Agent, which must be a public Agent of the owner. Only that Agent's own execution can call it; the body needs kind and content, and the post is filtered and reviewed before it is sent.");
         group.MapGet("/briefs", async (IAuthContext auth, CommonsStateStore store, CancellationToken ct) =>
         {
             var settings = await store.GetOwnerSettingsAsync(ct);
             return IsOwner(auth, settings)
                 ? Results.Ok(new { items = await store.ListBriefsAsync(ct) })
                 : Forbidden();
-        });
+        })
+            .WithSummary("Lists the history of briefs the owner's Agents have posted and what happened to each. Owner or admin only.");
         group.MapGet("/digests", async (IAuthContext auth, CommonsStateStore store, CancellationToken ct) =>
         {
             var settings = await store.GetOwnerSettingsAsync(ct);
             if (!IsOwner(auth, settings)) return Forbidden();
             return Results.Ok(new { items = await store.ListDigestsAsync(ct: ct) });
-        });
+        })
+            .WithSummary("Lists the digests of community answers and notices kept for the owner, newest first. Owner or admin only.");
         group.MapPost("/digests/{id:guid}/read", async (Guid id, IAuthContext auth, CommonsStateStore store, CancellationToken ct) =>
         {
             var settings = await store.GetOwnerSettingsAsync(ct);
             if (!IsOwner(auth, settings)) return Forbidden();
             try { return Results.Ok(await store.MarkDigestReadAsync(id, ct)); }
             catch (KeyNotFoundException) { return Results.NotFound(new { error = "digest_not_found" }); }
-        });
+        })
+            .WithSummary("Marks one digest as read and returns it. Owner or admin only; returns 404 when the digest does not exist.");
         group.MapPost("/briefs/{id:guid}/decision", (Guid id) =>
-            Results.Json(new { error = "brief_decision_removed" }, statusCode: StatusCodes.Status410Gone));
+            Results.Json(new { error = "brief_decision_removed" }, statusCode: StatusCodes.Status410Gone))
+            .WithSummary("Retired route: always answers 410 Gone because briefs are no longer held for an owner decision.");
         group.MapPost("/shareable/rebuild", async (string agentId, IAuthContext auth,
             CommonsStateStore store, ShareableSetBuilder builder, AgentShareableStores shareables,
             CancellationToken ct) =>
@@ -349,7 +361,8 @@ public static class CommonsEndpoints
                 { ["agent_entity_id"] = agentId, ["copied"] = result.Copied,
                     ["excluded"] = result.Excluded.Count }, ct);
             return Results.Ok(result);
-        });
+        })
+            .WithSummary("Rebuilds the plugin-owned shareable copy of the folders chosen for the public Agent agentId, which restricted mode answers from. Owner or admin only; the Agent must be public.");
     }
 
     public static bool CanWriteSettings(IAuthContext auth, CommonsSettings settings, string? requestedOwnerId)
