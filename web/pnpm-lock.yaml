@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  undici: 7.30.2
+
 importers:
 
   .:
@@ -589,8 +592,8 @@ packages:
     engines: {node: '>=14.17'}
     hasBin: true
 
-  undici@7.29.1:
-    resolution: {integrity: sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==}
+  undici@7.30.2:
+    resolution: {integrity: sha512-mLyPQnHwUxaM/rideoK/+KL8DaAJLRl4aBCfmX444aCSLnIaomqPLtNRe2jdCYcsk5wZzXrDIQC8ZeYNRAYyIA==}
     engines: {node: '>=20.18.1'}
 
   vite@8.3.4:
@@ -678,7 +681,7 @@ snapshots:
       adm-zip: 0.6.1
       isomorphic-ws: 5.0.0(ws@8.21.3)
       typescript: 6.0.3
-      undici: 7.29.1
+      undici: 7.30.2
       ws: 8.21.3
     transitivePeerDependencies:
       - bufferutil
@@ -1048,7 +1051,7 @@ snapshots:
 
   typescript@6.0.3: {}
 
-  undici@7.29.1: {}
+  undici@7.30.2: {}
 
   vite@8.3.4(jiti@2.7.0):
     dependencies:
