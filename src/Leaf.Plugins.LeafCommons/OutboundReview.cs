@@ -142,6 +142,38 @@ public sealed class CommonsOutboundReview(
 
     internal const int MaxErrorCodeLength = 40;
 
+    internal const int MaxHeldTextChars = 400;
+    private const int MaxSignalChars = 60;
+    private const int MaxSignals = 8;
+
+    /// <summary>
+    /// The owner-only notice for text the outbound Sentinel held: what held it (risk, signals,
+    /// handling, job), where it was headed, and the held text itself. The signals come from the
+    /// review JSON; they are never shown to the Agent or the thread (a rewrite-until-it-passes
+    /// oracle). The held text is untrusted: flattened to one line, bounded, and quoted; the digest
+    /// formatter quotes the whole notice again and strips links.
+    /// </summary>
+    public static string HeldOwnerNotice(string subject, JsonObject review, string heldText, string where)
+    {
+        var signals = review["signals"] is JsonArray array
+            ? array.Select(item => Flatten(item?.GetValue<string>(), MaxSignalChars))
+                .Where(item => item.Length > 0).Take(MaxSignals).ToArray()
+            : [];
+        var held = Flatten(heldText, MaxHeldTextChars);
+        return $"{subject} was held by the outbound safety check. Nothing was sent.\n"
+               + $"Risk: {Flatten(review["risk"]?.GetValue<string>(), 20)}; handling: "
+               + $"{Flatten(review["handling"]?.GetValue<string>(), 40)}; signals: "
+               + $"{(signals.Length == 0 ? "none" : string.Join(", ", signals))}.\n"
+               + $"Where: {Flatten(where, 80)}; job: {Flatten(review["job_id"]?.GetValue<string>(), 60)}.\n"
+               + $"Held text (untrusted, quoted): \"{held}\"";
+    }
+
+    private static string Flatten(string? text, int max)
+    {
+        var flat = Regex.Replace(text ?? "", @"\s+", " ").Trim().Replace('"', '\'');
+        return flat.Length <= max ? flat : flat[..(max - 1)] + "…";
+    }
+
     private static readonly Regex UndeliveredNoticePattern = new(
         @"\AI wrote a reply but couldn't post it here \(error code: [a-z0-9_]{1,40}\)\.\z",
         RegexOptions.CultureInvariant);

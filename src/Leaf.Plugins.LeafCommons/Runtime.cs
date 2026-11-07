@@ -153,7 +153,16 @@ public sealed class PublicAgentRuntime(
             $"commons-brief:{dispatchId:N}", ct, ownerUserId: configuration.Owner.OwnerUserId);
         await state.RecordAsync("outbound_review", Metadata(agent.AgentEntityId,
             ("dispatchId", dispatchId), ("outcome", verdict.Review["outcome"]?.GetValue<string>()),
-            ("available", !verdict.Unavailable)), ct);
+            ("available", !verdict.Unavailable), ("risk", verdict.Review["risk"]?.GetValue<string>()),
+            ("signals", verdict.Review["signals"]?.DeepClone()),
+            ("job_id", verdict.Review["job_id"]?.GetValue<string>())), ct);
+        if (!verdict.Allowed && !verdict.Unavailable)
+            // Owner-only: the reason and the held text. The Agent's result stays a bare
+            // sentinel_held, so a held brief cannot be reworded until it passes.
+            await digests.DeliverAsync(new("owner_notice", CommonsOutboundReview.HeldOwnerNotice(
+                "A Public Agent brief", verdict.Review,
+                $"{brief.Title}\n\n{brief.Content}" + (addresses.Length > 0 ? $"\n\n[addresses] {string.Join(", ", addresses)}" : ""),
+                $"channel {channelId}"), null, agent.AgentEntityId, channelId), ct);
         if (!verdict.Allowed)
             return await FinishBriefAsync(brief, agent.AgentEntityId, "blocked", null,
                 verdict.Unavailable ? "sentinel_unavailable" : "sentinel_held", dispatchId, ct);

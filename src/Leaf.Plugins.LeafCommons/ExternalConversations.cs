@@ -791,7 +791,8 @@ public sealed class PublicAgentConversationCoordinator(
                 verdict.Unavailable ? CommonsOutboundReview.UnavailableNotice : CommonsOutboundReview.WithheldNotice);
             await digests.DeliverAsync(new("owner_notice", verdict.Unavailable
                     ? "A Public Agent answer was withheld: the outbound safety check was unavailable. Nothing was sent."
-                    : "A Public Agent answer was withheld by the outbound safety check. The withheld text was not sent.",
+                    : CommonsOutboundReview.HeldOwnerNotice("A Public Agent answer", verdict.Review, content,
+                        $"thread {record.ThreadRef}"),
                 record.ThreadRef, agent.AgentEntityId), ct);
             return (null, reviewed);
         }
