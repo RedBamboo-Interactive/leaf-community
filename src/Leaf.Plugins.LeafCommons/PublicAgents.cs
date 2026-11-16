@@ -517,7 +517,8 @@ public sealed class PublicAgentCoordinator(
     {
         var core = new ConnectorCore(
             (request, ct) => runtime.HandleAsync(agentEntityId, request, ct),
-            (listening, ct) => runtime.HandleListeningEventAsync(agentEntityId, listening, ct));
+            (listening, ct) => runtime.HandleListeningEventAsync(agentEntityId, listening, ct),
+            new AgentScopedAudit(audit, agentEntityId));
         return new RelayConnector(async ct =>
         {
             var configuration = await state.GetConfigurationAsync(ct).ConfigureAwait(false);

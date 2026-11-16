@@ -472,18 +472,31 @@ public sealed record RelayListeningEvent(
     string? MessageId = null, string? AuthorDisplayName = null,
     DateTimeOffset? Timestamp = null, string? Operation = null, string? SuspendedBy = null);
 
+/// <param name="audit">Records <c>frame_abandoned</c>; in production scoped to the connector's Agent.</param>
 public sealed class ConnectorCore(
     Func<EnvoyRunRequest, CancellationToken, Task> handler,
-    Func<RelayListeningEvent, CancellationToken, Task>? listeningHandler = null)
+    Func<RelayListeningEvent, CancellationToken, Task>? listeningHandler = null,
+    ICommonsAudit? audit = null)
 {
-    /// <summary>Frames whose handling succeeded. Only these are acked without being handled again.</summary>
+    /// <summary>How many times one frame's handling may fail before it is acked and abandoned.</summary>
+    public const int MaxHandlingAttempts = 3;
+
+    /// <summary>Frames whose handling succeeded, or that were abandoned. These are acked without
+    /// being handled again.</summary>
     private readonly HashSet<string> processed = new(StringComparer.Ordinal);
+
+    /// <summary>Failed handlings per frame ID, for this connector process. A restart resets them,
+    /// which only costs a few extra attempts.</summary>
+    private readonly Dictionary<string, int> failures = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Handles one inbox frame, then acks it. A frame is marked processed only once its handling
-    /// succeeded: a handler that throws leaves it unprocessed and unacked, so the relay redelivers
-    /// it (on the next connection) and it is handled again. A frame that did succeed and arrives
-    /// again is acked without being handled twice.
+    /// succeeded: a handler that throws leaves it unprocessed and unacked (the exception
+    /// propagates and the connection is reopened), so the relay redelivers it and it is handled
+    /// again. A frame that did succeed and arrives again is acked without being handled twice.
+    /// After <see cref="MaxHandlingAttempts"/> failed handlings the frame is acked, marked
+    /// processed and recorded as <c>frame_abandoned</c>, so it no longer blocks the frames behind
+    /// it in the inbox.
     /// </summary>
     public async Task<bool> ProcessAsync(JsonElement frame, Func<string, Task> ack, CancellationToken ct = default)
     {
@@ -499,6 +512,45 @@ public sealed class ConnectorCore(
         }
         // A frame without a usable type is an unknown kind: acked, never retried.
         var type = Text(frame, "type");
+        try
+        {
+            await HandleFrameAsync(frame, id, type, ct);
+        }
+        catch (Exception error) when (error is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            var attempts = failures.GetValueOrDefault(id) + 1;
+            if (attempts < MaxHandlingAttempts)
+            {
+                failures[id] = attempts;
+                throw;
+            }
+            failures.Remove(id);
+            processed.Add(id);
+            await ack(id);
+            // Safe metadata only: never the exception message or the frame's content. A failing
+            // audit propagates after the ack, so the connector logs it and the frame stays dropped.
+            if (audit is not null)
+            {
+                var metadata = new Dictionary<string, object?>
+                {
+                    ["frameId"] = id,
+                    ["type"] = type,
+                    ["attempts"] = attempts,
+                    ["exceptionType"] = error.GetType().Name,
+                };
+                if (Text(frame, "messageId") is { Length: > 0 } messageId) metadata["messageId"] = messageId;
+                await audit.RecordAsync("frame_abandoned", metadata, ct);
+            }
+            return false;
+        }
+        failures.Remove(id);
+        processed.Add(id);
+        await ack(id);
+        return true;
+    }
+
+    private async Task HandleFrameAsync(JsonElement frame, string id, string? type, CancellationToken ct)
+    {
         if (type is "ping" or "event" or "announcement" or "owner_notice")
         {
             var thread = frame.TryGetProperty("threadRef", out var threadNode)
@@ -554,9 +606,6 @@ public sealed class ConnectorCore(
                 await listeningHandler(new(id, type, Text(frame, "channel") ?? "", "", null, null,
                     messageId), ct);
         }
-        processed.Add(id);
-        await ack(id);
-        return true;
     }
 
     /// <summary>

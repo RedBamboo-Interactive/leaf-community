@@ -257,15 +257,16 @@ public sealed class PublicAgentRuntime(
                 .FirstOrDefault(channel => channel.Name.Contains(hint, StringComparison.OrdinalIgnoreCase))?.Id)
             .FirstOrDefault(id => id is not null);
     }
+}
 
-    private sealed class AgentScopedAudit(ICommonsAudit inner, string agentEntityId) : ICommonsAudit
+/// <summary>Adds the Agent's entity ID to every audit it records.</summary>
+internal sealed class AgentScopedAudit(ICommonsAudit inner, string agentEntityId) : ICommonsAudit
+{
+    public Task RecordAsync(string eventName, IReadOnlyDictionary<string, object?> safeMetadata,
+        CancellationToken ct = default)
     {
-        public Task RecordAsync(string eventName, IReadOnlyDictionary<string, object?> safeMetadata,
-            CancellationToken ct = default)
-        {
-            var metadata = new Dictionary<string, object?>(safeMetadata)
-                { ["agent_entity_id"] = agentEntityId };
-            return inner.RecordAsync(eventName, metadata, ct);
-        }
+        var metadata = new Dictionary<string, object?>(safeMetadata)
+            { ["agent_entity_id"] = agentEntityId };
+        return inner.RecordAsync(eventName, metadata, ct);
     }
 }
