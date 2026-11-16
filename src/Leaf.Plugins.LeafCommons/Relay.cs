@@ -476,15 +476,29 @@ public sealed class ConnectorCore(
     Func<EnvoyRunRequest, CancellationToken, Task> handler,
     Func<RelayListeningEvent, CancellationToken, Task>? listeningHandler = null)
 {
+    /// <summary>Frames whose handling succeeded. Only these are acked without being handled again.</summary>
     private readonly HashSet<string> processed = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Handles one inbox frame, then acks it. A frame is marked processed only once its handling
+    /// succeeded: a handler that throws leaves it unprocessed and unacked, so the relay redelivers
+    /// it (on the next connection) and it is handled again. A frame that did succeed and arrives
+    /// again is acked without being handled twice.
+    /// </summary>
     public async Task<bool> ProcessAsync(JsonElement frame, Func<string, Task> ack, CancellationToken ct = default)
     {
         if (!frame.TryGetProperty("id", out var idNode) || idNode.ValueKind != JsonValueKind.String) return false;
         var id = idNode.GetString()!;
-        if (!processed.Add(id)) { await ack(id); return false; }
-        if (frame.TryGetProperty("expiresAt", out var expires) && expires.ValueKind == JsonValueKind.Number && expires.GetInt64() <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) { await ack(id); return false; }
-        var type = frame.GetProperty("type").GetString();
+        if (processed.Contains(id)) { await ack(id); return false; }
+        if (frame.TryGetProperty("expiresAt", out var expires) && expires.ValueKind == JsonValueKind.Number
+            && expires.TryGetInt64(out var expiresAt) && expiresAt <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+        {
+            processed.Add(id);
+            await ack(id);
+            return false;
+        }
+        // A frame without a usable type is an unknown kind: acked, never retried.
+        var type = Text(frame, "type");
         if (type is "ping" or "event" or "announcement" or "owner_notice")
         {
             var thread = frame.TryGetProperty("threadRef", out var threadNode)
@@ -540,6 +554,7 @@ public sealed class ConnectorCore(
                 await listeningHandler(new(id, type, Text(frame, "channel") ?? "", "", null, null,
                     messageId), ct);
         }
+        processed.Add(id);
         await ack(id);
         return true;
     }
