@@ -17,8 +17,9 @@ public sealed class LeafCommonsPlugin : ILeafPlugin
     {
         services.AddSingleton<SecretScanner>(); services.AddSingleton<OutboundFilter>(); services.AddSingleton<DigestFormatter>();
         services.AddSingleton<ShareableSetBuilder>();
-        var pluginDataRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RedLeaf", "PluginData", PluginId);
-        services.AddSingleton(new AgentShareableStores(pluginDataRoot));
+        // The folder RedLeaf gives the plugin. It used to be built as %LOCALAPPDATA%\RedLeaf\PluginData\leaf-commons, which is
+        // the same folder while RedLeaf's data is in its default place, so there is nothing to migrate.
+        services.AddSingleton(new AgentShareableStores(ctx.DataDirectory));
         services.AddSingleton(sp => new CommonsStateStore(sp.GetRequiredKeyedService<IEntityStore>(PluginId)));
         services.AddSingleton(sp => new AgentDirectory(sp.GetRequiredKeyedService<IEntityStore>(PluginId)));
         services.AddSingleton(sp => new CommonsExternalConversationStore(

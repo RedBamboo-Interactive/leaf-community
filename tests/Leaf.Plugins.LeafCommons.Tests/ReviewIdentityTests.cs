@@ -250,7 +250,7 @@ public sealed class ReviewIdentityTests : IDisposable
         services.AddSingleton<IUntrustedContentReview>(kernel);
         services.AddSingleton<IHttpContextAccessor>(requests);
         var plugin = new LeafCommonsPlugin();
-        plugin.ConfigureServices(services, new PluginContext { Manifest = plugin.Manifest, PluginDirectory = root, DevMode = true });
+        plugin.ConfigureServices(services, new PluginContext { Manifest = plugin.Manifest, PluginDirectory = root, DevMode = true, DataDirectory = Path.Combine(root, "PluginData", LeafCommonsPlugin.PluginId) });
         var review = services.BuildServiceProvider().GetRequiredService<CommonsOutboundReview>();
 
         await review.ReviewAsync(AgentId, "message:root", "A reply.", "key-1", ownerUserId: owner);
