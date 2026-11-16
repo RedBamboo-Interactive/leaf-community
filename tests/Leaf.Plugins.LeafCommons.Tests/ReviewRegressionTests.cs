@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Leaf.Plugins.LeafCommons;
 using Leaf.Sdk;
@@ -344,8 +345,13 @@ internal sealed class MemoryEntityStore : IEntityStore
     }
     public Task<LeafEntity?> GetBySlugAsync(string slug, CancellationToken ct = default) => Task.FromResult(byId.Values.FirstOrDefault(x => x.Slug == slug));
     public Task<LeafEntity?> GetBySlugAsync(string typeSlug, string slug, CancellationToken ct = default) => Task.FromResult(byId.Values.FirstOrDefault(x => x.TypeSlug == typeSlug && x.Slug == slug));
+    /// <summary>Filters by type and, like the kernel's JSONB containment, by every top-level
+    /// <see cref="EntityQuery.DataEquals"/> value.</summary>
     public Task<IReadOnlyList<LeafEntity>> QueryAsync(EntityQuery query, CancellationToken ct = default) =>
-        Task.FromResult<IReadOnlyList<LeafEntity>>(byId.Values.Where(x => x.TypeSlug == query.TypeSlug).OrderBy(x => x.Id).Skip(query.Offset).Take(query.Limit).ToArray());
+        Task.FromResult<IReadOnlyList<LeafEntity>>(byId.Values.Where(x => x.TypeSlug == query.TypeSlug
+            && (query.DataEquals ?? new Dictionary<string, object?>()).All(filter => JsonNode.DeepEquals(
+                x.Data[filter.Key], filter.Value is null ? null : JsonSerializer.SerializeToNode(filter.Value))))
+            .OrderBy(x => x.Id).Skip(query.Offset).Take(query.Limit).ToArray());
 
     public Task<LeafEntity> CreateAsync(string typeSlug, string name, JsonObject? data = null, CancellationToken ct = default)
     {
