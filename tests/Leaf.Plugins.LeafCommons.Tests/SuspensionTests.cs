@@ -35,6 +35,8 @@ internal sealed class FakeSuspensionRelay : IAsyncDisposable
     private readonly WebApplication app;
     public ConcurrentDictionary<string, Envoy> Envoys { get; } = new();
     public ConcurrentQueue<(string Credential, string Body)> ProfileRequests { get; } = new();
+    /// <summary>The query string of every connect request, as received.</summary>
+    public ConcurrentQueue<string> ConnectQueries { get; } = new();
     public string BaseUrl { get; }
 
     private FakeSuspensionRelay(WebApplication app, string baseUrl) { this.app = app; BaseUrl = baseUrl; }
@@ -86,6 +88,7 @@ internal sealed class FakeSuspensionRelay : IAsyncDisposable
                 return;
             }
             Interlocked.Increment(ref envoy.ConnectAttempts);
+            relay.ConnectQueries.Enqueue(context.Request.QueryString.Value ?? "");
             if (envoy.Status != "active" || !context.WebSockets.IsWebSocketRequest)
             {
                 context.Response.StatusCode = 403;

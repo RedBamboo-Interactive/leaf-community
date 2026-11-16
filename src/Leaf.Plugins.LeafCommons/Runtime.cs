@@ -26,6 +26,11 @@ public sealed class PublicAgentRuntime(
     public async Task HandleListeningEventAsync(
         string agentEntityId, RelayListeningEvent listening, CancellationToken ct = default)
     {
+        if (string.Equals(listening.Type, RelayFeatures.AnnouncementRetraction, StringComparison.Ordinal))
+        {
+            await RetractAnnouncementAsync(agentEntityId, listening, ct);
+            return;
+        }
         var configuration = await state.GetConfigurationAsync(ct);
         var agent = configuration.Agents.FirstOrDefault(item => item.Enabled && string.Equals(
             item.AgentEntityId, agentEntityId, StringComparison.OrdinalIgnoreCase));
@@ -58,6 +63,21 @@ public sealed class PublicAgentRuntime(
             : $"{update} in #{channel} from {author}: {snippet}";
         await digests.DeliverAsync(new(ownerNotice ? "owner_notice" : "announcement",
             content, null, agentEntityId, channel, listening.MessageId), ct);
+    }
+
+    /// <summary>
+    /// The relay took an announcement back: its digest is deleted for every public Agent of the
+    /// owner, so it disappears from the owner's view and from Nova's context. Nothing new is
+    /// stored and nobody is told; a retraction with no digest left is a successful no-op. Each
+    /// Envoy receives the retraction, so after the first one the others find nothing.
+    /// </summary>
+    private async Task RetractAnnouncementAsync(
+        string agentEntityId, RelayListeningEvent listening, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(listening.MessageId)) return;
+        var count = await state.DeleteAnnouncementDigestsAsync(listening.MessageId, ct);
+        await state.RecordAsync("digest_retracted", Metadata(agentEntityId,
+            ("messageId", listening.MessageId), ("count", count)), ct);
     }
 
     public async Task<EnvoyRunResult> HandleAsync(

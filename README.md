@@ -53,6 +53,14 @@ Read-only `#announcements` deliveries use the same path. They are deduplicated a
 updated by Discord message ID, remain explicitly quoted untrusted community news, and
 never invoke the Agent or create an automatic reply.
 
+A retracted announcement is taken back. The connector declares `features=announcement_retraction` on
+the Envoy WebSocket, so the relay sends it `announcement_retraction` frames; older connectors never
+receive them. Such a frame deletes that Discord message's announcement digest for every public
+Agent, so it leaves the owner's view and Nova's context. Other digests carrying the same ID are
+kept. Nothing new is stored or shown. The `digest_retracted` audit records the message ID and
+how many digests were deleted. A repeated retraction, or one with nothing left to delete, is
+acked and does nothing.
+
 When an enabled Agent collects installed-extension context, Leaf Community contributes only that Agent's unread digest quotations through `leaf.context-fragment/1`. The contribution is bounded, explicitly labelled external content, and contains no raw Discord transcript.
 
 ## Owner thread API

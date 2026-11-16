@@ -361,6 +361,46 @@ public sealed class CommonsStateStore(IEntityStore entities) : ICommonsAudit
         return ToDigest(entity);
     }
 
+    /// <summary>
+    /// Deletes every announcement digest of the Discord message <paramref name="sourceMessageId"/>,
+    /// for every public Agent, and returns how many it deleted. Other digest types carrying the
+    /// same ID are kept. Deleting an already-deleted digest is a no-op, so a repeated or concurrent
+    /// retraction is harmless.
+    /// </summary>
+    public async Task<int> DeleteAnnouncementDigestsAsync(
+        string sourceMessageId, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(sourceMessageId)) return 0;
+        const int page = 500;
+        var deleted = 0;
+        while (true)
+        {
+            var found = await entities.QueryAsync(new EntityQuery
+            {
+                TypeSlug = "leaf-commons-digest",
+                DataEquals = new Dictionary<string, object?>
+                {
+                    ["digest_type"] = "announcement",
+                    ["source_message_id"] = sourceMessageId,
+                },
+                Limit = page,
+            }, ct);
+            // The store filters already; the exact check here is what decides what is deleted.
+            var matches = found.Where(entity => entity.Data["digest_type"] is JsonValue type
+                    && type.TryGetValue<string>(out var typeText) && typeText == "announcement"
+                    && entity.Data["source_message_id"] is JsonValue source
+                    && source.TryGetValue<string>(out var sourceText)
+                    && string.Equals(sourceText, sourceMessageId, StringComparison.Ordinal))
+                .ToArray();
+            foreach (var match in matches)
+            {
+                await entities.DeleteAsync(match.Id, ct);
+                deleted++;
+            }
+            if (found.Count < page || matches.Length == 0) return deleted;
+        }
+    }
+
     public async Task<IReadOnlyList<StoredDigest>> ListDigestsAsync(
         bool unreadOnly = false, CancellationToken ct = default,
         string? agentEntityId = null)

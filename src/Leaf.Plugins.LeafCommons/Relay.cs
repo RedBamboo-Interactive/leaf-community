@@ -449,6 +449,24 @@ public sealed class RelayHttpClient(
     }
 }
 
+/// <summary>
+/// Optional relay features this client handles. They are declared with <c>features=</c> on the
+/// Envoy WebSocket (and on any inbox read): the relay sends a declared kind only to a client that
+/// declared it, because older clients ack and drop kinds they do not know.
+/// </summary>
+public static class RelayFeatures
+{
+    /// <summary>An <c>announcement_retraction</c> frame takes back an announcement digest.</summary>
+    public const string AnnouncementRetraction = "announcement_retraction";
+
+    public static IReadOnlyList<string> Declared { get; } = [AnnouncementRetraction];
+
+    /// <summary>The query parameter declaring <see cref="Declared"/>, comma-separated.</summary>
+    public static string Query => "features=" + string.Join(',', Declared);
+}
+
+/// <param name="Type"><c>announcement</c>, <c>owner_notice</c>, an unthreaded <c>event</c>, or
+/// <c>announcement_retraction</c> (no content; <paramref name="MessageId"/> names the announcement).</param>
 public sealed record RelayListeningEvent(
     string Id, string Type, string Channel, string Content, string? Sender, string? ThreadRef,
     string? MessageId = null, string? AuthorDisplayName = null,
@@ -512,6 +530,15 @@ public sealed class ConnectorCore(
                     Channel: channel, ReplyToDisplayName: replyToDisplayName,
                     Images: images, OmittedImages: omittedImages,
                     OpenInvitation: type == "event" && Text(frame, "invitation") == "open"), ct);
+        }
+        else if (type == RelayFeatures.AnnouncementRetraction)
+        {
+            // Carries no content: it names the announcement to take back. Without a message ID
+            // there is nothing to take back, and the item is acked like any unusable frame.
+            var messageId = Text(frame, "messageId");
+            if (!string.IsNullOrWhiteSpace(messageId) && listeningHandler is not null)
+                await listeningHandler(new(id, type, Text(frame, "channel") ?? "", "", null, null,
+                    messageId), ct);
         }
         await ack(id);
         return true;
@@ -672,7 +699,7 @@ public sealed class RelayConnector(Func<CancellationToken, Task<(Uri BaseUri, st
     {
         var (baseUri, credential) = await settings(ct).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(credential)) { await SetStatusAsync("disconnected", ct); await Task.Delay(TimeSpan.FromSeconds(5), ct); return; }
-        var uri = new UriBuilder(baseUri) { Scheme = baseUri.Scheme == "https" ? "wss" : "ws", Path = "/v1/connect", Query = "" }.Uri;
+        var uri = ConnectUri(baseUri);
         using var ws = new ClientWebSocket(); ws.Options.SetRequestHeader("Authorization", "Bearer " + credential);
         ws.Options.CollectHttpResponseDetails = true;
         try { await ws.ConnectAsync(uri, ct); }
@@ -692,6 +719,14 @@ public sealed class RelayConnector(Func<CancellationToken, Task<(Uri BaseUri, st
             await core.ProcessAsync(json.RootElement, id => SendAsync(ws, JsonSerializer.Serialize(new { type = "ack", id }), ct), ct);
         }
     }
+
+    /// <summary>The Envoy WebSocket, declaring the features this client handles.</summary>
+    internal static Uri ConnectUri(Uri baseUri) => new UriBuilder(baseUri)
+    {
+        Scheme = baseUri.Scheme == "https" ? "wss" : "ws",
+        Path = "/v1/connect",
+        Query = RelayFeatures.Query,
+    }.Uri;
 
     private static Task SendAsync(ClientWebSocket ws, string json, CancellationToken ct) => ws.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, ct);
     private async Task SetStatusAsync(string status, CancellationToken ct)
