@@ -150,22 +150,48 @@ public sealed class ConnectorRedeliveryTests : IDisposable
     }
 
     [Fact]
-    public async Task A_frame_failing_three_times_is_acked_and_audited_on_the_third_failure_and_later_frames_flow()
+    public async Task Three_quick_failures_inside_the_window_are_not_abandoned()
     {
-        var world = await WorldAsync();
+        var clock = new ManualClock();
+        var world = await WorldAsync(clock);
         world.Fail("announcement-delivery-1", int.MaxValue);
         var acked = new List<string>();
         Task Ack(string id) { acked.Add(id); return Task.CompletedTask; }
 
+        for (var attempt = 1; attempt <= 5; attempt++)
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => world.Core.ProcessAsync(Parse(Announcement), Ack));
+            clock.Advance(TimeSpan.FromSeconds(20));
+        }
+
+        // Five failures over 100 seconds: still retried, never acked, never audited.
+        Assert.Empty(acked);
+        Assert.Equal(5, world.ListeningCalls);
+        Assert.Equal(1, world.Core.FailingFrames);
+        Assert.DoesNotContain(await world.Store.ListAuditsAsync(), item => item.Event == "frame_abandoned");
+    }
+
+    [Fact]
+    public async Task Once_the_window_has_passed_the_next_failure_abandons_the_frame_with_the_audit_and_later_frames_flow()
+    {
+        var clock = new ManualClock();
+        var world = await WorldAsync(clock);
+        world.Fail("announcement-delivery-1", int.MaxValue);
+        var acked = new List<string>();
+        Task Ack(string id) { acked.Add(id); return Task.CompletedTask; }
+
+        // The window alone is not enough: the second failure, two minutes on, is still rethrown.
         await Assert.ThrowsAsync<InvalidOperationException>(() => world.Core.ProcessAsync(Parse(Announcement), Ack));
+        clock.Advance(ConnectorCore.AbandonAfter);
         await Assert.ThrowsAsync<InvalidOperationException>(() => world.Core.ProcessAsync(Parse(Announcement), Ack));
         Assert.Empty(acked);
-        Assert.DoesNotContain(await world.Store.ListAuditsAsync(), item => item.Event == "frame_abandoned");
 
+        // Three failures, the first two minutes ago: abandoned.
         Assert.False(await world.Core.ProcessAsync(Parse(Announcement), Ack));
 
         Assert.Equal(["announcement-delivery-1"], acked);
         Assert.Equal(3, world.ListeningCalls);
+        Assert.Equal(0, world.Core.FailingFrames);
         Assert.Empty(await world.Store.ListDigestsAsync());
         var audit = Assert.Single(await world.Store.ListAuditsAsync(), item => item.Event == "frame_abandoned");
         Assert.Equal("announcement-delivery-1", audit.Metadata["frameId"]!.GetValue<string>());
@@ -192,19 +218,25 @@ public sealed class ConnectorRedeliveryTests : IDisposable
     }
 
     [Fact]
-    public async Task A_frame_failing_twice_then_succeeding_is_handled_normally_without_an_audit()
+    public async Task A_frame_that_succeeds_inside_the_window_is_handled_normally_and_its_failures_are_cleared()
     {
-        var world = await WorldAsync();
+        var clock = new ManualClock();
+        var world = await WorldAsync(clock);
         await world.Core.ProcessAsync(Parse(Announcement), _ => Task.CompletedTask);
-        world.Fail("retraction-delivery-1", 2);
+        world.Fail("retraction-delivery-1", 3);
         var acked = new List<string>();
         Task Ack(string id) { acked.Add(id); return Task.CompletedTask; }
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() => world.Core.ProcessAsync(Parse(Retraction), Ack));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => world.Core.ProcessAsync(Parse(Retraction), Ack));
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() => world.Core.ProcessAsync(Parse(Retraction), Ack));
+            clock.Advance(TimeSpan.FromSeconds(30));
+        }
+        Assert.Equal(1, world.Core.FailingFrames);
         Assert.True(await world.Core.ProcessAsync(Parse(Retraction), Ack));
 
         Assert.Equal(["retraction-delivery-1"], acked);
+        Assert.Equal(0, world.Core.FailingFrames);
         Assert.Empty(await world.Store.ListDigestsAsync());
         Assert.Single(await world.Store.ListAuditsAsync(), item => item.Event == "digest_retracted");
         Assert.DoesNotContain(await world.Store.ListAuditsAsync(), item => item.Event == "frame_abandoned");
@@ -213,7 +245,9 @@ public sealed class ConnectorRedeliveryTests : IDisposable
     [Fact]
     public async Task A_permanently_failing_frame_is_abandoned_and_the_good_frame_behind_it_is_handled()
     {
-        var world = await WorldAsync();
+        // Each failure reads the clock once, and it moves a minute on each read: the third
+        // failure is two minutes after the first, without the test waiting for it.
+        var world = await WorldAsync(new SteppingClock(TimeSpan.FromSeconds(61)));
         world.Fail("announcement-delivery-1", int.MaxValue);
         await using var relay = await ReplayingRelay.StartAsync(Announcement, SecondAnnouncement);
         await using var connector = new RelayConnector(
@@ -249,7 +283,22 @@ public sealed class ConnectorRedeliveryTests : IDisposable
 
     private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement;
 
-    private async Task<World> WorldAsync()
+    private sealed class ManualClock : TimeProvider
+    {
+        private DateTimeOffset now = new(2026, 11, 16, 12, 0, 0, TimeSpan.Zero);
+        public override DateTimeOffset GetUtcNow() => now;
+        public void Advance(TimeSpan by) => now += by;
+    }
+
+    /// <summary>Moves <paramref name="step"/> forward every time it is read.</summary>
+    private sealed class SteppingClock(TimeSpan step) : TimeProvider
+    {
+        private long ticks = new DateTimeOffset(2026, 11, 16, 12, 0, 0, TimeSpan.Zero).UtcTicks;
+        public override DateTimeOffset GetUtcNow()
+            => new(Interlocked.Add(ref ticks, step.Ticks) - step.Ticks, TimeSpan.Zero);
+    }
+
+    private async Task<World> WorldAsync(TimeProvider? clock = null)
     {
         var store = new CommonsStateStore(new MemoryEntityStore());
         await store.SaveOwnerSettingsAsync(new(null, "https://relay.example", "Laurent", [], [], [], "owner-1"));
@@ -259,12 +308,12 @@ public sealed class ConnectorRedeliveryTests : IDisposable
             new RelayClientFactory(new FixedHttpClientFactory(new MultiAgentRelayHandler()), store),
             new OutboundFilter(new SecretScanner()), store,
             new CommonsDigestSink(store, new DigestFormatter(), store));
-        return new(store, runtime);
+        return new(store, runtime, clock);
     }
 
     private sealed class World
     {
-        public World(CommonsStateStore store, PublicAgentRuntime runtime)
+        public World(CommonsStateStore store, PublicAgentRuntime runtime, TimeProvider? clock)
         {
             Store = store;
             Core = new ConnectorCore((request, ct) => runtime.HandleAsync(NovaId, request, ct),
@@ -278,7 +327,7 @@ public sealed class ConnectorRedeliveryTests : IDisposable
                     }
                     await runtime.HandleListeningEventAsync(NovaId, listening, ct);
                 },
-                new AgentScopedAudit(store, NovaId));
+                new AgentScopedAudit(store, NovaId), clock);
         }
 
         private readonly ConcurrentDictionary<string, int> failuresLeft = new();

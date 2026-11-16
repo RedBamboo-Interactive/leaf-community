@@ -473,30 +473,46 @@ public sealed record RelayListeningEvent(
     DateTimeOffset? Timestamp = null, string? Operation = null, string? SuspendedBy = null);
 
 /// <param name="audit">Records <c>frame_abandoned</c>; in production scoped to the connector's Agent.</param>
+/// <param name="time">The clock for the abandonment window; the system clock by default.</param>
 public sealed class ConnectorCore(
     Func<EnvoyRunRequest, CancellationToken, Task> handler,
     Func<RelayListeningEvent, CancellationToken, Task>? listeningHandler = null,
-    ICommonsAudit? audit = null)
+    ICommonsAudit? audit = null,
+    TimeProvider? time = null)
 {
-    /// <summary>How many times one frame's handling may fail before it is acked and abandoned.</summary>
+    /// <summary>How many times one frame's handling must fail before it may be abandoned.</summary>
     public const int MaxHandlingAttempts = 3;
+
+    /// <summary>
+    /// How long after its first failure a frame must still be failing before it is abandoned, so
+    /// a short outage (the database unreachable for a minute) is retried through instead of
+    /// dropping the inbox one frame every few seconds.
+    /// </summary>
+    public static readonly TimeSpan AbandonAfter = TimeSpan.FromMinutes(2);
+
+    private readonly TimeProvider clock = time ?? TimeProvider.System;
 
     /// <summary>Frames whose handling succeeded, or that were abandoned. These are acked without
     /// being handled again.</summary>
     private readonly HashSet<string> processed = new(StringComparer.Ordinal);
 
-    /// <summary>Failed handlings per frame ID, for this connector process. A restart resets them,
-    /// which only costs a few extra attempts.</summary>
-    private readonly Dictionary<string, int> failures = new(StringComparer.Ordinal);
+    /// <summary>Failed handlings per frame ID and when the first one happened, for this connector
+    /// process. A restart resets them, which only costs a few extra attempts.</summary>
+    private readonly Dictionary<string, (int Attempts, DateTimeOffset FirstFailedAt)> failures =
+        new(StringComparer.Ordinal);
+
+    /// <summary>How many frames have failed and are still being retried.</summary>
+    internal int FailingFrames => failures.Count;
 
     /// <summary>
     /// Handles one inbox frame, then acks it. A frame is marked processed only once its handling
     /// succeeded: a handler that throws leaves it unprocessed and unacked (the exception
     /// propagates and the connection is reopened), so the relay redelivers it and it is handled
     /// again. A frame that did succeed and arrives again is acked without being handled twice.
-    /// After <see cref="MaxHandlingAttempts"/> failed handlings the frame is acked, marked
-    /// processed and recorded as <c>frame_abandoned</c>, so it no longer blocks the frames behind
-    /// it in the inbox.
+    /// Once a frame has failed at least <see cref="MaxHandlingAttempts"/> times and at least
+    /// <see cref="AbandonAfter"/> has passed since its first failure, its next failure acks it,
+    /// marks it processed and records <c>frame_abandoned</c>, so it no longer blocks the frames
+    /// behind it in the inbox. Until then every failure is rethrown.
     /// </summary>
     public async Task<bool> ProcessAsync(JsonElement frame, Func<string, Task> ack, CancellationToken ct = default)
     {
@@ -518,10 +534,13 @@ public sealed class ConnectorCore(
         }
         catch (Exception error) when (error is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            var attempts = failures.GetValueOrDefault(id) + 1;
-            if (attempts < MaxHandlingAttempts)
+            var now = clock.GetUtcNow();
+            var (attempts, firstFailedAt) = failures.TryGetValue(id, out var failed)
+                ? (failed.Attempts + 1, failed.FirstFailedAt)
+                : (1, now);
+            if (attempts < MaxHandlingAttempts || now - firstFailedAt < AbandonAfter)
             {
-                failures[id] = attempts;
+                failures[id] = (attempts, firstFailedAt);
                 throw;
             }
             failures.Remove(id);
